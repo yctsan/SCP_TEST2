@@ -26,12 +26,14 @@ class OverlayManager(
     fun show(onSurfaceReady: (Surface) -> Unit) {
         surfaceCallback = onSurfaceReady
 
-        val view = TextureView(context).apply {
-            // Exclude overlay from screen capture to avoid recursive feedback loop
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                setExcludeFromScreenCapture(true)
+        val view = TextureView(context)
+        // Exclude overlay from screen capture to avoid recursive feedback loop (API 34+)
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                val method = view.javaClass.getMethod("setExcludeFromScreenCapture", Boolean::class.javaPrimitiveType)
+                method.invoke(view, true)
             }
-        }
+        } catch (_: Exception) {}
         textureView = view
 
         val params = WindowManager.LayoutParams(

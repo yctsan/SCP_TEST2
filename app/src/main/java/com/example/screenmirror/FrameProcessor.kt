@@ -33,7 +33,7 @@ class FrameProcessor(
                 val buffer = plane.buffer
                 val pixelStride = plane.pixelStride
                 val rowStride = plane.rowStride
-                val rowPadding = rowStride - pixelStride * captureWidth
+                val rowPadding = rowStride - pixelStride * width
 
                 val bitmapWidth = width + rowPadding / pixelStride
 
