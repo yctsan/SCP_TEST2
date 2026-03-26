@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Screen Mirror Overlay</string>
+    <string name="start_capture">Start Capture</string>
+    <string name="stop_capture">Stop Capture</string>
+    <string name="instruction">Captures the screen, flips it horizontally, and displays it as a floating overlay.</string>
+    <string name="notification_channel_name">Screen Capture</string>
+    <string name="notification_title">Screen Mirror Active</string>
+    <string name="notification_text">Capturing and mirroring screen output</string>
+    <string name="stop">Stop</string>
+</resources>
