@@ -75,20 +75,16 @@ class ScreenCaptureService : Service() {
         val screenHeight = metrics.heightPixels
         val screenDensity = metrics.densityDpi
 
-        // Overlay is 1/3 of screen size
-        val overlayWidth = screenWidth / 3
-        val overlayHeight = screenHeight / 3
-
         imageReader = ImageReader.newInstance(
             screenWidth, screenHeight, PixelFormat.RGBA_8888, 2
         )
 
-        overlayManager = OverlayManager(this, overlayWidth, overlayHeight)
+        // Full-screen 1:1 overlay — no scaling
+        overlayManager = OverlayManager(this, screenWidth, screenHeight)
         overlayManager!!.show { surface ->
             frameProcessor = FrameProcessor(
                 imageReader!!, surface,
-                screenWidth, screenHeight,
-                overlayWidth, overlayHeight
+                screenWidth, screenHeight
             )
             frameProcessor!!.start()
         }
