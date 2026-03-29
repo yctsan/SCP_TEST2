@@ -24,6 +24,7 @@ class FrameProcessor(
     }
 
     private var reusableBitmap: Bitmap? = null
+    @Volatile private var frameCount = 0
 
     fun start() {
         imageReader.setOnImageAvailableListener({ reader ->
@@ -58,6 +59,9 @@ class FrameProcessor(
                 canvas.drawBitmap(reusableBitmap!!, 0f, 0f, paint)
 
                 overlaySurface.unlockCanvasAndPost(canvas)
+                frameCount++
+            } catch (e: Exception) {
+                // Silently skip bad frames
             } finally {
                 image.close()
             }

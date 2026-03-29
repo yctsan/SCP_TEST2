@@ -1,6 +1,7 @@
 package com.example.screenmirror
 
 import android.content.Context
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.view.Gravity
 import android.view.MotionEvent
@@ -9,6 +10,7 @@ import android.view.TextureView
 import android.view.WindowManager
 import android.graphics.SurfaceTexture
 import android.view.View
+import android.widget.FrameLayout
 
 class OverlayManager(
     private val context: Context,
@@ -19,12 +21,20 @@ class OverlayManager(
     private val windowManager =
         context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
+    private var containerView: FrameLayout? = null
     private var textureView: TextureView? = null
     private var surface: Surface? = null
     private var surfaceCallback: ((Surface) -> Unit)? = null
 
     fun show(onSurfaceReady: (Surface) -> Unit) {
         surfaceCallback = onSurfaceReady
+
+        // Create a container with a visible red border so the overlay is clearly visible
+        val container = FrameLayout(context)
+        container.setBackgroundColor(Color.TRANSPARENT)
+        container.setPadding(3, 3, 3, 3)
+        container.setBackgroundColor(Color.argb(180, 255, 0, 0))
+        containerView = container
 
         val view = TextureView(context)
         // Exclude overlay from screen capture to avoid recursive feedback loop (API 34+)
@@ -34,7 +44,20 @@ class OverlayManager(
                 method.invoke(view, true)
             }
         } catch (_: Exception) {}
+
+        // Also exclude the container
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                val method = container.javaClass.getMethod("setExcludeFromScreenCapture", Boolean::class.javaPrimitiveType)
+                method.invoke(container, true)
+            }
+        } catch (_: Exception) {}
+
         textureView = view
+        container.addView(view, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
 
         val params = WindowManager.LayoutParams(
             overlayWidth,
@@ -75,7 +98,7 @@ class OverlayManager(
         }
 
         // Drag to move the overlay
-        view.setOnTouchListener(object : View.OnTouchListener {
+        container.setOnTouchListener(object : View.OnTouchListener {
             private var initialX = 0
             private var initialY = 0
             private var touchX = 0f
@@ -93,7 +116,7 @@ class OverlayManager(
                     MotionEvent.ACTION_MOVE -> {
                         params.x = initialX + (event.rawX - touchX).toInt()
                         params.y = initialY + (event.rawY - touchY).toInt()
-                        windowManager.updateViewLayout(view, params)
+                        windowManager.updateViewLayout(container, params)
                         return true
                     }
                 }
@@ -101,13 +124,14 @@ class OverlayManager(
             }
         })
 
-        windowManager.addView(view, params)
+        windowManager.addView(container, params)
     }
 
     fun dismiss() {
-        textureView?.let {
+        containerView?.let {
             windowManager.removeView(it)
         }
+        containerView = null
         textureView = null
         surface?.release()
         surface = null

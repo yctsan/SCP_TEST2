@@ -53,57 +53,68 @@ class ScreenCaptureService : Service() {
     }
 
     private fun startCapture(resultCode: Int, data: Intent) {
-        createNotificationChannel()
-        val notification = buildNotification()
+        try {
+            createNotificationChannel()
+            val notification = buildNotification()
 
-        startForeground(
-            NOTIFICATION_ID,
-            notification,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-        )
-
-        val projectionManager =
-            getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = projectionManager.getMediaProjection(resultCode, data)
-
-        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        wm.defaultDisplay.getRealMetrics(metrics)
-
-        val screenWidth = metrics.widthPixels
-        val screenHeight = metrics.heightPixels
-        val screenDensity = metrics.densityDpi
-
-        imageReader = ImageReader.newInstance(
-            screenWidth, screenHeight, PixelFormat.RGBA_8888, 2
-        )
-
-        // Full-screen 1:1 overlay — no scaling
-        overlayManager = OverlayManager(this, screenWidth, screenHeight)
-        overlayManager!!.show { surface ->
-            frameProcessor = FrameProcessor(
-                imageReader!!, surface,
-                screenWidth, screenHeight
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             )
-            frameProcessor!!.start()
-        }
 
-        virtualDisplay = mediaProjection!!.createVirtualDisplay(
-            "ScreenMirror",
-            screenWidth,
-            screenHeight,
-            screenDensity,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader!!.surface,
-            null, null
-        )
+            val projectionManager =
+                getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = projectionManager.getMediaProjection(resultCode, data)
 
-        mediaProjection!!.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                stopCapture()
+            if (mediaProjection == null) {
+                android.widget.Toast.makeText(this, "Failed to get media projection", android.widget.Toast.LENGTH_LONG).show()
+                stopSelf()
+                return
             }
-        }, null)
+
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(metrics)
+
+            val screenWidth = metrics.widthPixels
+            val screenHeight = metrics.heightPixels
+            val screenDensity = metrics.densityDpi
+
+            imageReader = ImageReader.newInstance(
+                screenWidth, screenHeight, PixelFormat.RGBA_8888, 2
+            )
+
+            // Full-screen 1:1 overlay — no scaling
+            overlayManager = OverlayManager(this, screenWidth, screenHeight)
+            overlayManager!!.show { surface ->
+                frameProcessor = FrameProcessor(
+                    imageReader!!, surface,
+                    screenWidth, screenHeight
+                )
+                frameProcessor!!.start()
+            }
+
+            virtualDisplay = mediaProjection!!.createVirtualDisplay(
+                "ScreenMirror",
+                screenWidth,
+                screenHeight,
+                screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader!!.surface,
+                null, null
+            )
+
+            mediaProjection!!.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    stopCapture()
+                }
+            }, null)
+        } catch (e: Exception) {
+            android.widget.Toast.makeText(this, "Capture error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+            stopCapture()
+        }
     }
 
     private fun stopCapture() {
