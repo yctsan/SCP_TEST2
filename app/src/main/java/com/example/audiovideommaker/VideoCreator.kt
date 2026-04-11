@@ -9,13 +9,16 @@ import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.nio.ByteBuffer
+import kotlin.math.abs
+import kotlin.math.log10
+import kotlin.math.pow
+import kotlin.math.sqrt
 
 /**
  * Creates an MP4 video by encoding a single still image as video frames
  * for the full duration of the supplied audio track.
  *
- * Audio balance is applied by scaling left/right PCM samples before muxing.
+ * Processing order: decode PCM → normalize (optional) → balance → encode
  */
 object VideoCreator {
 
@@ -28,17 +31,35 @@ object VideoCreator {
     private const val AUDIO_BIT    = 128_000    // 128 kbps
     private const val TIMEOUT_US   = 10_000L
 
+    /** Target peak level for peak normalisation: -1 dBFS */
+    private const val TARGET_PEAK_DBFS  = -1.0
+    /** Target RMS level for loudness normalisation: -18 dBFS (EBU R128 programme loudness) */
+    private const val TARGET_RMS_DBFS   = -18.0
+    /** Maximum allowed gain in dB to avoid extreme amplification of near-silent audio */
+    private const val MAX_GAIN_DB       = 40.0
+
+    enum class NormalizeMode {
+        /** No normalisation applied */
+        NONE,
+        /** Scale so the loudest sample just reaches TARGET_PEAK_DBFS */
+        PEAK,
+        /** Scale so the RMS level matches TARGET_RMS_DBFS */
+        RMS
+    }
+
     /**
-     * @param leftVol   0.0 – 1.0 (1.0 = full left channel)
-     * @param rightVol  0.0 – 1.0 (1.0 = full right channel)
-     * @return Uri pointing to the temporary cache file
+     * @param leftVol       0.0–1.0 gain for left channel  (1.0 = unchanged)
+     * @param rightVol      0.0–1.0 gain for right channel (1.0 = unchanged)
+     * @param normalizeMode which automatic normalisation algorithm to apply
+     * @return Uri pointing to the temporary MP4 cache file
      */
     suspend fun create(
-        context:  Context,
-        audioUri: Uri,
-        imageUri: Uri?,
-        leftVol:  Float = 1f,
-        rightVol: Float = 1f
+        context:       Context,
+        audioUri:      Uri,
+        imageUri:      Uri?,
+        leftVol:       Float         = 1f,
+        rightVol:      Float         = 1f,
+        normalizeMode: NormalizeMode = NormalizeMode.NONE
     ): Uri = withContext(Dispatchers.IO) {
 
         val outFile = File(context.cacheDir, "avm_output_${System.currentTimeMillis()}.mp4")
@@ -57,17 +78,26 @@ object VideoCreator {
         val audioDurationUs = pcmData.size.toLong() * 1_000_000L /
                 (sampleRate.toLong() * channelCount.toLong() * 2L)  // 16-bit = 2 bytes/sample
 
-        // ── 3. Apply balance ──
+        // ── 3. Normalise (before balance so the target level is meaningful) ──
+        val appliedGainDb = when (normalizeMode) {
+            NormalizeMode.PEAK -> normalizePeak(pcmData)
+            NormalizeMode.RMS  -> normalizeRms(pcmData)
+            NormalizeMode.NONE -> 0.0
+        }
+        // appliedGainDb is stored but currently returned for potential UI display; unused here.
+        _ = appliedGainDb
+
+        // ── 4. Apply balance ──
         applyBalance(pcmData, channelCount, leftVol, rightVol)
 
-        // ── 4. Encode video + audio into MP4 ──
+        // ── 5. Encode video + audio into MP4 ──
         mux(
-            outFile       = outFile,
-            bitmap        = srcBitmap,
-            pcmData       = pcmData,
-            sampleRate    = sampleRate,
-            channelCount  = channelCount,
-            durationUs    = audioDurationUs
+            outFile      = outFile,
+            bitmap       = srcBitmap,
+            pcmData      = pcmData,
+            sampleRate   = sampleRate,
+            channelCount = channelCount,
+            durationUs   = audioDurationUs
         )
 
         srcBitmap.recycle()
@@ -75,8 +105,93 @@ object VideoCreator {
     }
 
     // ───────────────────────────────────────────────
+    // Volume normalisation
+    // ───────────────────────────────────────────────
+
+    /**
+     * Peak normalisation (two-pass).
+     *
+     * Pass 1 – scan all 16-bit LE samples to find the maximum absolute value.
+     * Pass 2 – apply a linear gain so that peak maps to TARGET_PEAK_DBFS.
+     *
+     * Gain is capped at MAX_GAIN_DB to prevent extreme amplification of
+     * near-silent material.
+     *
+     * @return the gain applied in dB (0 if audio was silent)
+     */
+    private fun normalizePeak(pcm: ByteArray): Double {
+        // Pass 1: find peak
+        var peak = 0
+        var i = 0
+        while (i + 1 < pcm.size) {
+            val s = readSampleLE(pcm, i)
+            val a = abs(s)
+            if (a > peak) peak = a
+            i += 2
+        }
+        if (peak == 0) return 0.0  // silence – nothing to do
+
+        val targetLinear = 32767.0 * 10.0.pow(TARGET_PEAK_DBFS / 20.0)
+        val rawGain      = targetLinear / peak
+        val gainDb       = 20.0 * log10(rawGain)
+        val clampedGainDb= gainDb.coerceAtMost(MAX_GAIN_DB)
+        val gain         = 10.0.pow(clampedGainDb / 20.0).toFloat()
+
+        // Pass 2: apply gain
+        applyGainAllChannels(pcm, gain)
+        return clampedGainDb
+    }
+
+    /**
+     * RMS (loudness) normalisation (two-pass).
+     *
+     * Pass 1 – compute RMS level across all samples.
+     * Pass 2 – apply gain so RMS reaches TARGET_RMS_DBFS, then hard-limit
+     *          any samples that clip as a result.
+     *
+     * Gain is capped at MAX_GAIN_DB.
+     *
+     * @return the gain applied in dB (0 if audio was silent)
+     */
+    private fun normalizeRms(pcm: ByteArray): Double {
+        // Pass 1: compute RMS
+        var sumSq = 0.0
+        var count = 0
+        var i = 0
+        while (i + 1 < pcm.size) {
+            val s = readSampleLE(pcm, i).toDouble()
+            sumSq += s * s
+            count++
+            i += 2
+        }
+        if (count == 0 || sumSq == 0.0) return 0.0
+
+        val rms          = sqrt(sumSq / count)
+        val rmsDb        = 20.0 * log10(rms / 32767.0)
+        val neededGainDb = TARGET_RMS_DBFS - rmsDb
+        val clampedGainDb= neededGainDb.coerceAtMost(MAX_GAIN_DB)
+        val gain         = 10.0.pow(clampedGainDb / 20.0).toFloat()
+
+        // Pass 2: apply gain (coerceIn handles any resulting clips)
+        applyGainAllChannels(pcm, gain)
+        return clampedGainDb
+    }
+
+    /** Multiplies every 16-bit LE sample by [gain], clamping to [-32768, 32767]. */
+    private fun applyGainAllChannels(pcm: ByteArray, gain: Float) {
+        var i = 0
+        while (i + 1 < pcm.size) {
+            val s      = readSampleLE(pcm, i)
+            val scaled = (s * gain).toInt().coerceIn(-32768, 32767)
+            writeSampleLE(pcm, i, scaled)
+            i += 2
+        }
+    }
+
+    // ───────────────────────────────────────────────
     // Bitmap loading
     // ───────────────────────────────────────────────
+
     private fun loadAndScaleBitmap(context: Context, uri: Uri): Bitmap {
         val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use {
@@ -90,11 +205,10 @@ object VideoCreator {
             android.graphics.BitmapFactory.decodeStream(it, null, loadOpts)
         } ?: Bitmap.createBitmap(VIDEO_WIDTH, VIDEO_HEIGHT, Bitmap.Config.ARGB_8888)
 
-        // Scale to exactly VIDEO_WIDTH x VIDEO_HEIGHT (letter-box or fill)
         val scaled = Bitmap.createBitmap(VIDEO_WIDTH, VIDEO_HEIGHT, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(scaled)
         canvas.drawColor(Color.BLACK)
-        val ratioSrc = raw.width.toFloat() / raw.height
+        val ratioSrc = raw.width.toFloat()  / raw.height
         val ratioDst = VIDEO_WIDTH.toFloat() / VIDEO_HEIGHT
         val (dw, dh) = if (ratioSrc > ratioDst)
             VIDEO_WIDTH to (VIDEO_WIDTH / ratioSrc).toInt()
@@ -110,6 +224,7 @@ object VideoCreator {
     // ───────────────────────────────────────────────
     // PCM decode
     // ───────────────────────────────────────────────
+
     data class PcmResult(val bytes: ByteArray, val sampleRate: Int, val channels: Int)
 
     private fun decodeToPcm(context: Context, uri: Uri): PcmResult {
@@ -129,9 +244,9 @@ object VideoCreator {
         checkNotNull(format) { "No audio track found in file" }
         extractor.selectTrack(audioTrack)
 
-        val mime        = format.getString(MediaFormat.KEY_MIME)!!
-        val sampleRate  = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val channelCount= format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+        val mime         = format.getString(MediaFormat.KEY_MIME)!!
+        val sampleRate   = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+        val channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
 
         val decoder = MediaCodec.createDecoderByType(mime)
         decoder.configure(format, null, null, 0)
@@ -153,10 +268,9 @@ object VideoCreator {
                     extractor.advance()
                 }
             }
-
             val outIdx = decoder.dequeueOutputBuffer(info, TIMEOUT_US)
             if (outIdx >= 0) {
-                val buf = decoder.getOutputBuffer(outIdx)!!
+                val buf   = decoder.getOutputBuffer(outIdx)!!
                 val chunk = ByteArray(info.size)
                 buf.get(chunk)
                 pcmOut.write(chunk)
@@ -173,53 +287,69 @@ object VideoCreator {
     }
 
     // ───────────────────────────────────────────────
-    // Balance: scale 16-bit PCM samples per channel
+    // Balance
     // ───────────────────────────────────────────────
+
     private fun applyBalance(pcm: ByteArray, channels: Int, leftVol: Float, rightVol: Float) {
         if (leftVol == 1f && rightVol == 1f) return
         if (channels < 2) {
-            // mono – apply average of left/right
-            val vol = (leftVol + rightVol) / 2f
-            scaleChannel(pcm, 0, 1, vol)
+            scaleChannel(pcm, 0, 1, (leftVol + rightVol) / 2f)
             return
         }
-        scaleChannel(pcm, 0, channels, leftVol)   // left
-        scaleChannel(pcm, 1, channels, rightVol)  // right
+        scaleChannel(pcm, 0, channels, leftVol)
+        scaleChannel(pcm, 1, channels, rightVol)
     }
 
-    /** Scales every sample of a given channel index in interleaved 16-bit PCM. */
     private fun scaleChannel(pcm: ByteArray, chIdx: Int, channels: Int, vol: Float) {
-        val bytesPerSample = 2
-        val frameSize      = channels * bytesPerSample
-        var i = chIdx * bytesPerSample
+        val frameSize = channels * 2
+        var i = chIdx * 2
         while (i + 1 < pcm.size) {
-            val s = (pcm[i].toInt() and 0xFF) or (pcm[i + 1].toInt() shl 8)  // little-endian
+            val s      = readSampleLE(pcm, i)
             val scaled = (s * vol).toInt().coerceIn(-32768, 32767)
-            pcm[i]     = (scaled and 0xFF).toByte()
-            pcm[i + 1] = ((scaled shr 8) and 0xFF).toByte()
+            writeSampleLE(pcm, i, scaled)
             i += frameSize
         }
     }
 
     // ───────────────────────────────────────────────
-    // Mux: encode still-frame video + AAC audio into MP4
+    // 16-bit little-endian helpers
     // ───────────────────────────────────────────────
+
+    /** Reads a signed 16-bit little-endian sample from [buf] at byte offset [off]. */
+    private fun readSampleLE(buf: ByteArray, off: Int): Int {
+        val lo = buf[off].toInt()     and 0xFF
+        val hi = buf[off + 1].toInt() and 0xFF
+        val u  = (hi shl 8) or lo
+        // sign-extend from 16 bits
+        return if (u >= 0x8000) u - 0x10000 else u
+    }
+
+    /** Writes a signed 16-bit little-endian sample to [buf] at byte offset [off]. */
+    private fun writeSampleLE(buf: ByteArray, off: Int, value: Int) {
+        buf[off]     = (value and 0xFF).toByte()
+        buf[off + 1] = ((value shr 8) and 0xFF).toByte()
+    }
+
+    // ───────────────────────────────────────────────
+    // Mux: encode still-frame video + AAC audio → MP4
+    // ───────────────────────────────────────────────
+
     private fun mux(
-        outFile:      File,
-        bitmap:       Bitmap,
-        pcmData:      ByteArray,
-        sampleRate:   Int,
-        channelCount: Int,
-        durationUs:   Long
+        outFile:     File,
+        bitmap:      Bitmap,
+        pcmData:     ByteArray,
+        sampleRate:  Int,
+        channelCount:Int,
+        durationUs:  Long
     ) {
         val muxer = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
 
-        // — encode video —
+        // — video encoder —
         val videoFormat = MediaFormat.createVideoFormat(VIDEO_MIME, VIDEO_WIDTH, VIDEO_HEIGHT).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, VIDEO_BIT)
-            setInteger(MediaFormat.KEY_FRAME_RATE, VIDEO_FPS)
+            setInteger(MediaFormat.KEY_BIT_RATE,      VIDEO_BIT)
+            setInteger(MediaFormat.KEY_FRAME_RATE,    VIDEO_FPS)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         }
         val videoEncoder = MediaCodec.createEncoderByType(VIDEO_MIME)
@@ -227,31 +357,25 @@ object VideoCreator {
         val surface = videoEncoder.createInputSurface()
         videoEncoder.start()
 
-        val videoInfo    = MediaCodec.BufferInfo()
-        var videoTrackId = -1
-        val totalFrames  = ((durationUs / 1_000_000.0) * VIDEO_FPS).toLong().coerceAtLeast(1)
-        val frameUs      = 1_000_000L / VIDEO_FPS
-        var frameIdx     = 0L
-        var encoderDone  = false
+        val videoInfo   = MediaCodec.BufferInfo()
+        var videoTrackId= -1
+        val totalFrames = ((durationUs / 1_000_000.0) * VIDEO_FPS).toLong().coerceAtLeast(1)
+        val frameUs     = 1_000_000L / VIDEO_FPS
+        var frameIdx    = 0L
+        var videoDone   = false
 
-        while (!encoderDone) {
-            // draw the bitmap on the surface for each frame
+        while (!videoDone) {
             if (frameIdx <= totalFrames) {
-                val canvas = surface.lockHardwareCanvas()
-                canvas.drawBitmap(bitmap, 0f, 0f, null)
-                surface.unlockCanvasAndPost(canvas)
+                val c = surface.lockHardwareCanvas()
+                c.drawBitmap(bitmap, 0f, 0f, null)
+                surface.unlockCanvasAndPost(c)
                 frameIdx++
-                if (frameIdx > totalFrames) {
-                    videoEncoder.signalEndOfInputStream()
-                }
+                if (frameIdx > totalFrames) videoEncoder.signalEndOfInputStream()
             }
-
             val outIdx = videoEncoder.dequeueOutputBuffer(videoInfo, TIMEOUT_US)
             when {
-                outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ->
                     videoTrackId = muxer.addTrack(videoEncoder.outputFormat)
-                    // audio track added below; muxer.start() called after both tracks known
-                }
                 outIdx >= 0 -> {
                     val buf = videoEncoder.getOutputBuffer(outIdx)!!
                     if (videoInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
@@ -260,16 +384,14 @@ object VideoCreator {
                     }
                     videoEncoder.releaseOutputBuffer(outIdx, false)
                     if (videoInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0)
-                        encoderDone = true
+                        videoDone = true
                 }
             }
         }
 
-        // — encode audio (AAC) —
-        val chanMask = if (channelCount == 1)
-            AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO
+        // — audio encoder (AAC) —
         val audioFormat = MediaFormat.createAudioFormat(AUDIO_MIME, sampleRate, channelCount).apply {
-            setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BIT)
+            setInteger(MediaFormat.KEY_BIT_RATE,   AUDIO_BIT)
             setInteger(MediaFormat.KEY_AAC_PROFILE,
                 MediaCodecInfo.CodecProfileLevel.AACObjectLC)
         }
@@ -279,56 +401,46 @@ object VideoCreator {
 
         val audioInfo    = MediaCodec.BufferInfo()
         var audioTrackId = muxer.addTrack(audioEncoder.outputFormat)
-
-        // need both track ids before start
         muxer.start()
 
-        var pcmOffset      = 0
-        var audioEncDone   = false
-        var audioPtsUs     = 0L
+        var pcmOffset  = 0
+        var audioDone  = false
+        var audioPtsUs = 0L
 
-        while (!audioEncDone) {
+        while (!audioDone) {
             val inIdx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
             if (inIdx >= 0) {
-                val buf = audioEncoder.getInputBuffer(inIdx)!!
+                val buf   = audioEncoder.getInputBuffer(inIdx)!!
                 buf.clear()
                 val chunk = minOf(buf.capacity(), pcmData.size - pcmOffset)
                 if (chunk <= 0) {
-                    audioEncoder.queueInputBuffer(
-                        inIdx, 0, 0, audioPtsUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                    )
+                    audioEncoder.queueInputBuffer(inIdx, 0, 0, audioPtsUs,
+                        MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                 } else {
                     buf.put(pcmData, pcmOffset, chunk)
                     audioEncoder.queueInputBuffer(inIdx, 0, chunk, audioPtsUs, 0)
-                    val samplesInChunk = chunk / (channelCount * 2)
-                    audioPtsUs += samplesInChunk * 1_000_000L / sampleRate
+                    audioPtsUs += (chunk / (channelCount * 2)).toLong() * 1_000_000L / sampleRate
                     pcmOffset  += chunk
                 }
             }
-
             val outIdx = audioEncoder.dequeueOutputBuffer(audioInfo, TIMEOUT_US)
             when {
-                outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ->
                     audioTrackId = muxer.addTrack(audioEncoder.outputFormat)
-                }
                 outIdx >= 0 -> {
                     val buf = audioEncoder.getOutputBuffer(outIdx)!!
-                    if (audioInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
+                    if (audioInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0)
                         muxer.writeSampleData(audioTrackId, buf, audioInfo)
-                    }
                     audioEncoder.releaseOutputBuffer(outIdx, false)
                     if (audioInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0)
-                        audioEncDone = true
+                        audioDone = true
                 }
             }
         }
 
-        audioEncoder.stop()
-        audioEncoder.release()
-        videoEncoder.stop()
-        videoEncoder.release()
+        audioEncoder.stop(); audioEncoder.release()
+        videoEncoder.stop(); videoEncoder.release()
         surface.release()
-        muxer.stop()
-        muxer.release()
+        muxer.stop(); muxer.release()
     }
 }
