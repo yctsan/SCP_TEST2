@@ -1,11 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Screen Mirror Overlay</string>
-    <string name="start_capture">Start Capture</string>
-    <string name="stop_capture">Stop Capture</string>
-    <string name="instruction">Captures the screen, flips it horizontally, and displays it as a floating overlay.</string>
-    <string name="notification_channel_name">Screen Capture</string>
-    <string name="notification_title">Screen Mirror Active</string>
-    <string name="notification_text">Capturing and mirroring screen output</string>
-    <string name="stop">Stop</string>
+    <string name="app_name">Audio Video Maker</string>
+    <string name="btn_pick_audio">Pick Audio File</string>
+    <string name="btn_pick_image">Pick Image (optional)</string>
+    <string name="btn_use_default_image">Use Default Black Image</string>
+    <string name="btn_create_video">Create Video</string>
+    <string name="btn_save_video">Save Video As…</string>
+    <string name="label_audio">Audio file:</string>
+    <string name="label_image">Image source:</string>
+    <string name="label_balance">Audio balance (L ← → R):</string>
+    <string name="none_selected">None selected</string>
+    <string name="default_black_image">Default 1280×720 black</string>
+    <string name="status_idle">Idle</string>
+    <string name="status_creating">Creating video…</string>
+    <string name="status_done">Done! Video saved.</string>
+    <string name="error_no_audio">Please select an audio file first.</string>
+    <string name="error_create_failed">Video creation failed.</string>
+    <string name="permission_rationale">Storage permission is needed to read audio/image files.</string>
 </resources>
