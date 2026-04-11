@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "ScreenMirror"
+rootProject.name = "AudioVideoMaker"
 include(":app")
