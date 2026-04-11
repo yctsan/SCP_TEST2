@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.example.audiovideommaker.VideoCreator.NormalizeMode
 import com.example.audiovideommaker.databinding.ActivityMainBinding
 import kotlinx.coroutines.launch
 
@@ -20,18 +21,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
 
     private var audioUri: Uri? = null
-    private var imageUri: Uri? = null          // null = use default black frame
-    private var pendingVideoUri: Uri? = null   // temp output before save
+    private var imageUri: Uri? = null
+    private var pendingVideoUri: Uri? = null
 
     // ── Permission request ──
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
-        if (grants.values.all { it }) {
-            // permissions OK, nothing extra to do – user taps button again
-        } else {
-            toast(getString(R.string.permission_rationale))
-        }
+        if (!grants.values.all { it }) toast(getString(R.string.permission_rationale))
     }
 
     // ── Audio picker ──
@@ -89,19 +86,13 @@ class MainActivity : AppCompatActivity() {
         setupBalanceSeek()
 
         binding.btnPickAudio.setOnClickListener {
-            if (hasMediaPermissions()) {
-                audioPickerLauncher.launch(arrayOf("audio/*"))
-            } else {
-                requestMediaPermissions()
-            }
+            if (hasMediaPermissions()) audioPickerLauncher.launch(arrayOf("audio/*"))
+            else requestMediaPermissions()
         }
 
         binding.btnPickImage.setOnClickListener {
-            if (hasMediaPermissions()) {
-                imagePickerLauncher.launch(arrayOf("image/*"))
-            } else {
-                requestMediaPermissions()
-            }
+            if (hasMediaPermissions()) imagePickerLauncher.launch(arrayOf("image/*"))
+            else requestMediaPermissions()
         }
 
         binding.btnDefaultImage.setOnClickListener {
@@ -117,16 +108,22 @@ class MainActivity : AppCompatActivity() {
     private fun setupBalanceSeek() {
         binding.seekBalance.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
-                val offset = progress - 100  // -100 (full L) to +100 (full R)
+                val offset = progress - 100
                 binding.tvBalanceValue.text = when {
-                    offset < -5  -> "Left ${ -offset}"
-                    offset > 5   -> "Right $offset"
-                    else         -> "Center (0)"
+                    offset < -5 -> "Left ${-offset}"
+                    offset > 5  -> "Right $offset"
+                    else        -> "Center (0)"
                 }
             }
             override fun onStartTrackingTouch(sb: SeekBar) {}
             override fun onStopTrackingTouch(sb: SeekBar) {}
         })
+    }
+
+    private fun selectedNormalizeMode(): NormalizeMode = when (binding.rgNormalize.checkedRadioButtonId) {
+        R.id.rbNormalizePeak -> NormalizeMode.PEAK
+        R.id.rbNormalizeRms  -> NormalizeMode.RMS
+        else                 -> NormalizeMode.NONE
     }
 
     private fun onCreateVideo() {
@@ -136,9 +133,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val balanceOffset = binding.seekBalance.progress - 100  // -100 .. +100
+        val balanceOffset = binding.seekBalance.progress - 100
         val leftVol  = if (balanceOffset >= 0) 1f else (100 + balanceOffset) / 100f
         val rightVol = if (balanceOffset <= 0) 1f else (100 - balanceOffset) / 100f
+        val normalizeMode = selectedNormalizeMode()
 
         setStatus(getString(R.string.status_creating))
         binding.progressBar.visibility = View.VISIBLE
@@ -147,14 +145,14 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val outUri = VideoCreator.create(
-                    context    = this@MainActivity,
-                    audioUri   = audio,
-                    imageUri   = imageUri,
-                    leftVol    = leftVol,
-                    rightVol   = rightVol
+                    context       = this@MainActivity,
+                    audioUri      = audio,
+                    imageUri      = imageUri,
+                    leftVol       = leftVol,
+                    rightVol      = rightVol,
+                    normalizeMode = normalizeMode
                 )
                 pendingVideoUri = outUri
-                // prompt user to choose save location
                 savePickerLauncher.launch("output_video.mp4")
             } catch (e: Exception) {
                 setStatus(getString(R.string.error_create_failed))
@@ -166,15 +164,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Helpers ──
-
-    private fun setStatus(msg: String) {
-        binding.tvStatus.text = msg
-    }
-
-    private fun toast(msg: String) {
-        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-    }
+    private fun setStatus(msg: String) { binding.tvStatus.text = msg }
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 
     private fun hasMediaPermissions(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

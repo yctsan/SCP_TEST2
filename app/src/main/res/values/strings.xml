@@ -9,6 +9,10 @@
     <string name="label_audio">Audio file:</string>
     <string name="label_image">Image source:</string>
     <string name="label_balance">Audio balance (L ← → R):</string>
+    <string name="label_normalize">Volume normalisation:</string>
+    <string name="normalize_none">Off</string>
+    <string name="normalize_peak">Peak (max loudness, −1 dBFS)</string>
+    <string name="normalize_rms">RMS / Loudness (−18 dBFS)</string>
     <string name="none_selected">None selected</string>
     <string name="default_black_image">Default 1280×720 black</string>
     <string name="status_idle">Idle</string>
