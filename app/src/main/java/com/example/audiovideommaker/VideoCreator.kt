@@ -4,10 +4,12 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.media.*
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.net.Uri
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.log10
@@ -17,50 +19,44 @@ import kotlin.math.sqrt
 /**
  * Creates an MP4 video from a still image + audio file.
  *
- * Processing order: decode PCM → normalize (optional) → balance → encode
+ * Processing order: decode PCM -> normalize (optional) -> balance -> encode
  */
 object VideoCreator {
 
-    private const val VIDEO_MIME   = MediaFormat.MIMETYPE_VIDEO_AVC
+    private const val VIDEO_MIME   = "video/avc"
     private const val VIDEO_WIDTH  = 1280
     private const val VIDEO_HEIGHT = 720
     private const val VIDEO_FPS    = 30
     private const val VIDEO_BIT    = 4_000_000
-    private const val AUDIO_MIME   = MediaFormat.MIMETYPE_AUDIO_AAC
+    private const val AUDIO_MIME   = "audio/mp4a-latm"
     private const val AUDIO_BIT    = 128_000
     private const val TIMEOUT_US   = 10_000L
 
     /** Target peak for peak normalisation: -1 dBFS */
     private const val TARGET_PEAK_DBFS = -1.0
-    /** Target RMS for loudness normalisation: -18 dBFS (broadcast programme loudness) */
+    /** Target RMS for loudness normalisation: -18 dBFS */
     private const val TARGET_RMS_DBFS  = -18.0
     /** Maximum allowed gain to prevent extreme amplification of near-silent material */
     private const val MAX_GAIN_DB      = 40.0
 
     enum class NormalizeMode {
-        /** No normalisation */
         NONE,
-        /** Scale so the loudest sample reaches TARGET_PEAK_DBFS */
         PEAK,
-        /** Scale so the RMS level reaches TARGET_RMS_DBFS */
         RMS
     }
 
     /**
-     * @param leftVol       gain for left  channel (0.0–1.0, 1.0 = unchanged)
-     * @param rightVol      gain for right channel (0.0–1.0, 1.0 = unchanged)
-     * @param normalizeMode which automatic normalisation algorithm to apply
-     * @return Uri pointing to the temporary MP4 cache file
+     * Synchronous creation of MP4 from audio + optional image.
+     * Call from a background thread.
      */
-    suspend fun create(
+    fun create(
         context:       Context,
         audioUri:      Uri,
         imageUri:      Uri?,
         leftVol:       Float         = 1f,
         rightVol:      Float         = 1f,
         normalizeMode: NormalizeMode = NormalizeMode.NONE
-    ): Uri = withContext(Dispatchers.IO) {
-
+    ): Uri {
         val outFile = File(context.cacheDir, "avm_output_${System.currentTimeMillis()}.mp4")
 
         // 1. Prepare source bitmap
@@ -73,47 +69,37 @@ object VideoCreator {
         }
 
         // 2. Decode audio to raw 16-bit PCM
-        val (pcmData, sampleRate, channelCount) = decodeToPcm(context, audioUri)
-        val audioDurationUs = pcmData.size.toLong() * 1_000_000L /
+        val (pcmBytes, sampleRate, channelCount) = decodeToPcm(context, audioUri)
+        val audioDurationUs = pcmBytes.size.toLong() * 1_000_000L /
                 (sampleRate.toLong() * channelCount.toLong() * 2L)
 
-        // 3. Normalise volume (two-pass: analyse then apply gain)
+        // 3. Normalise volume
         when (normalizeMode) {
-            NormalizeMode.PEAK -> normalizePeak(pcmData)
-            NormalizeMode.RMS  -> normalizeRms(pcmData)
-            NormalizeMode.NONE -> Unit
+            NormalizeMode.PEAK -> normalizePeak(pcmBytes)
+            NormalizeMode.RMS  -> normalizeRms(pcmBytes)
+            NormalizeMode.NONE -> { /* no-op */ }
         }
 
         // 4. Apply stereo balance
-        applyBalance(pcmData, channelCount, leftVol, rightVol)
+        applyBalance(pcmBytes, channelCount, leftVol, rightVol)
 
         // 5. Encode video + audio into MP4
         mux(
             outFile      = outFile,
             bitmap       = srcBitmap,
-            pcmData      = pcmData,
+            pcmData      = pcmBytes,
             sampleRate   = sampleRate,
             channelCount = channelCount,
             durationUs   = audioDurationUs
         )
 
         srcBitmap.recycle()
-        Uri.fromFile(outFile)
+        return Uri.fromFile(outFile)
     }
 
-    // ─────────────────────────────────────────────────
-    // Volume normalisation
-    // ─────────────────────────────────────────────────
+    // ── Volume normalisation ──
 
-    /**
-     * Peak normalisation (two-pass).
-     *
-     * Pass 1 – scan all samples to find maximum absolute value.
-     * Pass 2 – apply linear gain so that peak maps to TARGET_PEAK_DBFS.
-     * Gain is capped at MAX_GAIN_DB.
-     */
     private fun normalizePeak(pcm: ByteArray) {
-        // Pass 1: find peak
         var peak = 0
         var i = 0
         while (i + 1 < pcm.size) {
@@ -121,27 +107,16 @@ object VideoCreator {
             if (a > peak) peak = a
             i += 2
         }
-        if (peak == 0) return  // silence
+        if (peak == 0) return
 
         val targetLinear  = 32767.0 * 10.0.pow(TARGET_PEAK_DBFS / 20.0)
         val rawGainDb     = 20.0 * log10(targetLinear / peak)
         val clampedGainDb = rawGainDb.coerceAtMost(MAX_GAIN_DB)
         val gain          = 10.0.pow(clampedGainDb / 20.0).toFloat()
-
-        // Pass 2: apply gain
         applyGainAllSamples(pcm, gain)
     }
 
-    /**
-     * RMS (loudness) normalisation (two-pass).
-     *
-     * Pass 1 – compute RMS level across all samples.
-     * Pass 2 – apply gain so RMS reaches TARGET_RMS_DBFS.
-     * Any resulting clips are hard-limited via coerceIn.
-     * Gain is capped at MAX_GAIN_DB.
-     */
     private fun normalizeRms(pcm: ByteArray) {
-        // Pass 1: compute RMS
         var sumSq = 0.0
         var count = 0
         var i = 0
@@ -151,19 +126,16 @@ object VideoCreator {
             count++
             i += 2
         }
-        if (count == 0 || sumSq == 0.0) return  // silence
+        if (count == 0 || sumSq == 0.0) return
 
         val rms           = sqrt(sumSq / count)
         val rmsDb         = 20.0 * log10(rms / 32767.0)
         val neededGainDb  = TARGET_RMS_DBFS - rmsDb
         val clampedGainDb = neededGainDb.coerceAtMost(MAX_GAIN_DB)
         val gain          = 10.0.pow(clampedGainDb / 20.0).toFloat()
-
-        // Pass 2: apply gain (coerceIn clips any over-scale)
         applyGainAllSamples(pcm, gain)
     }
 
-    /** Multiplies every 16-bit LE sample by [gain], clamping to [-32768, 32767]. */
     private fun applyGainAllSamples(pcm: ByteArray, gain: Float) {
         var i = 0
         while (i + 1 < pcm.size) {
@@ -173,9 +145,7 @@ object VideoCreator {
         }
     }
 
-    // ─────────────────────────────────────────────────
-    // Bitmap loading
-    // ─────────────────────────────────────────────────
+    // ── Bitmap loading ──
 
     private fun loadAndScaleBitmap(context: Context, uri: Uri): Bitmap {
         val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -206,11 +176,13 @@ object VideoCreator {
         return scaled
     }
 
-    // ─────────────────────────────────────────────────
-    // PCM decode
-    // ─────────────────────────────────────────────────
+    // ── PCM decode ──
 
-    data class PcmResult(val bytes: ByteArray, val sampleRate: Int, val channels: Int)
+    private data class PcmResult(val bytes: ByteArray, val sampleRate: Int, val channels: Int)
+
+    private operator fun PcmResult.component1() = bytes
+    private operator fun PcmResult.component2() = sampleRate
+    private operator fun PcmResult.component3() = channels
 
     private fun decodeToPcm(context: Context, uri: Uri): PcmResult {
         val extractor = MediaExtractor()
@@ -220,7 +192,8 @@ object VideoCreator {
         var format: MediaFormat? = null
         for (i in 0 until extractor.trackCount) {
             val fmt = extractor.getTrackFormat(i)
-            if (fmt.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
+            val mime = fmt.getString(MediaFormat.KEY_MIME) ?: ""
+            if (mime.startsWith("audio/")) {
                 audioTrack = i
                 format = fmt
                 break
@@ -270,9 +243,7 @@ object VideoCreator {
         return PcmResult(pcmOut.toByteArray(), sampleRate, channelCount)
     }
 
-    // ─────────────────────────────────────────────────
-    // Balance
-    // ─────────────────────────────────────────────────
+    // ── Balance ──
 
     private fun applyBalance(pcm: ByteArray, channels: Int, leftVol: Float, rightVol: Float) {
         if (leftVol == 1f && rightVol == 1f) return
@@ -294,9 +265,7 @@ object VideoCreator {
         }
     }
 
-    // ─────────────────────────────────────────────────
-    // 16-bit little-endian helpers
-    // ─────────────────────────────────────────────────
+    // ── 16-bit little-endian helpers ──
 
     private fun readSampleLE(buf: ByteArray, off: Int): Int {
         val lo = buf[off].toInt()     and 0xFF
@@ -310,9 +279,7 @@ object VideoCreator {
         buf[off + 1] = ((value shr 8) and 0xFF).toByte()
     }
 
-    // ─────────────────────────────────────────────────
-    // Mux: encode still-frame video + AAC audio → MP4
-    // ─────────────────────────────────────────────────
+    // ── Mux: encode still-frame video + AAC audio -> MP4 ──
 
     private fun mux(
         outFile:      File,
@@ -324,7 +291,6 @@ object VideoCreator {
     ) {
         val muxer = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
 
-        // Video encoder
         val videoFormat = MediaFormat.createVideoFormat(VIDEO_MIME, VIDEO_WIDTH, VIDEO_HEIGHT).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -369,7 +335,6 @@ object VideoCreator {
             }
         }
 
-        // Audio encoder (AAC-LC)
         val audioFormat = MediaFormat.createAudioFormat(AUDIO_MIME, sampleRate, channelCount).apply {
             setInteger(MediaFormat.KEY_BIT_RATE,   AUDIO_BIT)
             setInteger(MediaFormat.KEY_AAC_PROFILE,
