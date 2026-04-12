@@ -3,8 +3,6 @@ package com.example.audiovideommaker
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.io.File
 
 object FileUtils {
@@ -24,8 +22,8 @@ object FileUtils {
         return uri.lastPathSegment ?: uri.toString()
     }
 
-    /** Copies content from src URI to dest URI using streams. */
-    suspend fun copyUri(context: Context, src: Uri, dest: Uri) = withContext(Dispatchers.IO) {
+    /** Copies content from src URI to dest URI using streams. Call from a background thread. */
+    fun copyUri(context: Context, src: Uri, dest: Uri) {
         context.contentResolver.openInputStream(src)?.use { input ->
             context.contentResolver.openOutputStream(dest)?.use { output ->
                 input.copyTo(output)
