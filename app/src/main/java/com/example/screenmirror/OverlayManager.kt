@@ -31,28 +31,11 @@ class OverlayManager(
 
         // Create a container with a visible red border so the overlay is clearly visible
         val container = FrameLayout(context)
-        container.setBackgroundColor(Color.TRANSPARENT)
         container.setPadding(3, 3, 3, 3)
         container.setBackgroundColor(Color.argb(180, 255, 0, 0))
         containerView = container
 
         val view = TextureView(context)
-        // Exclude overlay from screen capture to avoid recursive feedback loop (API 34+)
-        try {
-            if (android.os.Build.VERSION.SDK_INT >= 34) {
-                val method = view.javaClass.getMethod("setExcludeFromScreenCapture", Boolean::class.javaPrimitiveType)
-                method.invoke(view, true)
-            }
-        } catch (_: Exception) {}
-
-        // Also exclude the container
-        try {
-            if (android.os.Build.VERSION.SDK_INT >= 34) {
-                val method = container.javaClass.getMethod("setExcludeFromScreenCapture", Boolean::class.javaPrimitiveType)
-                method.invoke(container, true)
-            }
-        } catch (_: Exception) {}
-
         textureView = view
         container.addView(view, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
@@ -64,7 +47,11 @@ class OverlayManager(
             overlayHeight,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    // FLAG_SECURE excludes this window from MediaProjection capture,
+                    // which is essential to avoid a feedback capture loop that would
+                    // otherwise saturate the screen to our red background color.
+                    WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
