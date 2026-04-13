@@ -7,13 +7,16 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.WindowManager
 
@@ -33,6 +36,9 @@ class ScreenCaptureService : Service() {
     private var imageReader: ImageReader? = null
     private var overlayManager: OverlayManager? = null
     private var frameProcessor: FrameProcessor? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var lastWidth = 0
+    private var lastHeight = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -80,45 +86,47 @@ class ScreenCaptureService : Service() {
                 }
             }, null)
 
-            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-            val metrics = DisplayMetrics()
-            @Suppress("DEPRECATION")
-            wm.defaultDisplay.getRealMetrics(metrics)
-
-            val screenWidth = metrics.widthPixels
-            val screenHeight = metrics.heightPixels
-            val screenDensity = metrics.densityDpi
-
-            imageReader = ImageReader.newInstance(
-                screenWidth, screenHeight, PixelFormat.RGBA_8888, 2
-            )
-
-            // Full-screen 1:1 overlay — no scaling
-            overlayManager = OverlayManager(this, screenWidth, screenHeight)
-            overlayManager!!.show { surface ->
-                frameProcessor = FrameProcessor(
-                    imageReader!!, surface,
-                    screenWidth, screenHeight
-                )
-                frameProcessor!!.start()
-            }
-
-            virtualDisplay = mediaProjection!!.createVirtualDisplay(
-                "ScreenMirror",
-                screenWidth,
-                screenHeight,
-                screenDensity,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader!!.surface,
-                null, null
-            )
+            val metrics = currentMetrics()
+            setupPipeline(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi)
         } catch (e: Exception) {
             android.widget.Toast.makeText(this, "Capture error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
             stopCapture()
         }
     }
 
-    private fun stopCapture() {
+    private fun currentMetrics(): DisplayMetrics {
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        wm.defaultDisplay.getRealMetrics(metrics)
+        return metrics
+    }
+
+    private fun setupPipeline(w: Int, h: Int, density: Int) {
+        lastWidth = w
+        lastHeight = h
+
+        imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+
+        // Full-screen 1:1 overlay — no scaling
+        overlayManager = OverlayManager(this, w, h)
+        overlayManager!!.show { surface ->
+            frameProcessor = FrameProcessor(imageReader!!, surface, w, h)
+            frameProcessor!!.start()
+        }
+
+        virtualDisplay = mediaProjection!!.createVirtualDisplay(
+            "ScreenMirror",
+            w,
+            h,
+            density,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            imageReader!!.surface,
+            null, null
+        )
+    }
+
+    private fun teardownPipeline() {
         frameProcessor?.stop()
         frameProcessor = null
 
@@ -128,11 +136,37 @@ class ScreenCaptureService : Service() {
         imageReader?.close()
         imageReader = null
 
-        mediaProjection?.stop()
-        mediaProjection = null
-
         overlayManager?.dismiss()
         overlayManager = null
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (mediaProjection == null) return
+
+        // Post to next frame so the WindowManager has already applied the new rotation
+        mainHandler.post {
+            if (mediaProjection == null) return@post
+            val metrics = currentMetrics()
+            if (metrics.widthPixels == lastWidth && metrics.heightPixels == lastHeight) {
+                return@post
+            }
+            try {
+                teardownPipeline()
+                setupPipeline(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi)
+            } catch (e: Exception) {
+                android.widget.Toast.makeText(
+                    this, "Rotation error: ${e.message}", android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    private fun stopCapture() {
+        teardownPipeline()
+
+        mediaProjection?.stop()
+        mediaProjection = null
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
