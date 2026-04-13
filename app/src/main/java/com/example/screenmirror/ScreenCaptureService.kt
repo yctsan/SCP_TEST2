@@ -126,6 +126,37 @@ class ScreenCaptureService : Service() {
         )
     }
 
+    /**
+     * Rebuild the downstream pipeline (ImageReader + overlay + FrameProcessor) at
+     * new dimensions, while keeping the existing VirtualDisplay alive. Android 14+
+     * treats releasing + recreating a VirtualDisplay from the same MediaProjection
+     * as a token-reuse error, so we must resize the existing display in place.
+     */
+    private fun resizePipeline(w: Int, h: Int, density: Int) {
+        frameProcessor?.stop()
+        frameProcessor = null
+
+        imageReader?.close()
+        imageReader = null
+
+        overlayManager?.dismiss()
+        overlayManager = null
+
+        imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+
+        virtualDisplay?.resize(w, h, density)
+        virtualDisplay?.surface = imageReader!!.surface
+
+        overlayManager = OverlayManager(this, w, h)
+        overlayManager!!.show { surface ->
+            frameProcessor = FrameProcessor(imageReader!!, surface, w, h)
+            frameProcessor!!.start()
+        }
+
+        lastWidth = w
+        lastHeight = h
+    }
+
     private fun teardownPipeline() {
         frameProcessor?.stop()
         frameProcessor = null
@@ -142,18 +173,17 @@ class ScreenCaptureService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        if (mediaProjection == null) return
+        if (mediaProjection == null || virtualDisplay == null) return
 
-        // Post to next frame so the WindowManager has already applied the new rotation
+        // Post so the WindowManager has already applied the new rotation
         mainHandler.post {
-            if (mediaProjection == null) return@post
+            if (mediaProjection == null || virtualDisplay == null) return@post
             val metrics = currentMetrics()
             if (metrics.widthPixels == lastWidth && metrics.heightPixels == lastHeight) {
                 return@post
             }
             try {
-                teardownPipeline()
-                setupPipeline(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi)
+                resizePipeline(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi)
             } catch (e: Exception) {
                 android.widget.Toast.makeText(
                     this, "Rotation error: ${e.message}", android.widget.Toast.LENGTH_LONG
