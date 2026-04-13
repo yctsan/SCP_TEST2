@@ -27,10 +27,10 @@
             </intent-filter>
         </activity>
 
-        <!-- foregroundServiceType set programmatically since aapt2 from API 23 SDK doesn't know the attribute -->
         <service
             android:name=".ScreenCaptureService"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
     </application>
 
