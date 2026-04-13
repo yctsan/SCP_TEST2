@@ -73,6 +73,13 @@ class ScreenCaptureService : Service() {
                 return
             }
 
+            // Android 14+ requires the callback to be registered BEFORE createVirtualDisplay
+            mediaProjection!!.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    stopCapture()
+                }
+            }, null)
+
             val wm = getSystemService(WINDOW_SERVICE) as WindowManager
             val metrics = DisplayMetrics()
             @Suppress("DEPRECATION")
@@ -105,12 +112,6 @@ class ScreenCaptureService : Service() {
                 imageReader!!.surface,
                 null, null
             )
-
-            mediaProjection!!.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() {
-                    stopCapture()
-                }
-            }, null)
         } catch (e: Exception) {
             android.widget.Toast.makeText(this, "Capture error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
             stopCapture()
