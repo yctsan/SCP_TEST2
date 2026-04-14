@@ -30,10 +30,11 @@ class ScreenCaptureService : Service() {
         private const val CHANNEL_ID = "screen_capture_channel"
         private const val NOTIFICATION_ID = 1
 
-        // Fraction of the screen that the floating overlay covers.
-        // Must stay well below 1.0 so the rest of the screen can actually be
-        // captured (FLAG_SECURE blacks out the overlay region in the capture).
-        private const val OVERLAY_SCALE = 0.4f
+        // Fraction of the screen that the mirror overlay covers. 1.0f = full
+        // screen. When using single-app projection this gives a clean
+        // full-screen mirror. When projecting the whole screen, expect
+        // feedback flicker because the overlay captures itself.
+        private const val OVERLAY_SCALE = 1.0f
     }
 
     private var mediaProjection: MediaProjection? = null

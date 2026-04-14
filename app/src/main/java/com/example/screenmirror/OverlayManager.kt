@@ -44,10 +44,16 @@ class OverlayManager(
             overlayHeight,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    // FLAG_SECURE excludes this window from MediaProjection capture,
-                    // which is essential to avoid a feedback capture loop.
-                    WindowManager.LayoutParams.FLAG_SECURE,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            // NOTE: we intentionally do NOT use FLAG_SECURE here. FLAG_SECURE
+            // would exclude this window from MediaProjection captures, but the
+            // excluded area is rendered as solid black in the capture. With a
+            // full-screen overlay, that means the captured frame is entirely
+            // black and nothing mirrors. The tradeoff: when projecting the
+            // whole screen, the capture includes this overlay and the horizontal
+            // flip produces feedback flicker. The app is intended to be used
+            // with single-app projection, where the selected app is captured
+            // independently of this overlay — that mode works cleanly.
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
