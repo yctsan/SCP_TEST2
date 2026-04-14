@@ -29,6 +29,11 @@ class ScreenCaptureService : Service() {
         const val EXTRA_DATA = "data"
         private const val CHANNEL_ID = "screen_capture_channel"
         private const val NOTIFICATION_ID = 1
+
+        // Fraction of the screen that the floating overlay covers.
+        // Must stay well below 1.0 so the rest of the screen can actually be
+        // captured (FLAG_SECURE blacks out the overlay region in the capture).
+        private const val OVERLAY_SCALE = 0.4f
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -108,8 +113,14 @@ class ScreenCaptureService : Service() {
 
         imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
 
-        // Full-screen 1:1 overlay — no scaling
-        overlayManager = OverlayManager(this, w, h)
+        // Floating overlay sized to a fraction of the screen. It must NOT cover
+        // the whole display: the overlay uses FLAG_SECURE to stay out of the
+        // capture loop, and FLAG_SECURE windows show up as solid black in the
+        // captured frames. A smaller overlay means only a small rectangle of
+        // the mirrored image is blacked out where the overlay itself lives.
+        val overlayW = (w * OVERLAY_SCALE).toInt()
+        val overlayH = (h * OVERLAY_SCALE).toInt()
+        overlayManager = OverlayManager(this, overlayW, overlayH)
         overlayManager!!.show()
 
         frameProcessor = FrameProcessor(imageReader!!, w, h) { bitmap ->
@@ -149,7 +160,9 @@ class ScreenCaptureService : Service() {
         virtualDisplay?.resize(w, h, density)
         virtualDisplay?.surface = imageReader!!.surface
 
-        overlayManager = OverlayManager(this, w, h)
+        val overlayW = (w * OVERLAY_SCALE).toInt()
+        val overlayH = (h * OVERLAY_SCALE).toInt()
+        overlayManager = OverlayManager(this, overlayW, overlayH)
         overlayManager!!.show()
 
         frameProcessor = FrameProcessor(imageReader!!, w, h) { bitmap ->
