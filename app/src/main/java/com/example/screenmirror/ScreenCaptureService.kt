@@ -110,10 +110,12 @@ class ScreenCaptureService : Service() {
 
         // Full-screen 1:1 overlay — no scaling
         overlayManager = OverlayManager(this, w, h)
-        overlayManager!!.show { surface ->
-            frameProcessor = FrameProcessor(imageReader!!, surface, w, h)
-            frameProcessor!!.start()
+        overlayManager!!.show()
+
+        frameProcessor = FrameProcessor(imageReader!!, w, h) { bitmap ->
+            overlayManager?.submitFrame(bitmap)
         }
+        frameProcessor!!.start()
 
         virtualDisplay = mediaProjection!!.createVirtualDisplay(
             "ScreenMirror",
@@ -148,10 +150,12 @@ class ScreenCaptureService : Service() {
         virtualDisplay?.surface = imageReader!!.surface
 
         overlayManager = OverlayManager(this, w, h)
-        overlayManager!!.show { surface ->
-            frameProcessor = FrameProcessor(imageReader!!, surface, w, h)
-            frameProcessor!!.start()
+        overlayManager!!.show()
+
+        frameProcessor = FrameProcessor(imageReader!!, w, h) { bitmap ->
+            overlayManager?.submitFrame(bitmap)
         }
+        frameProcessor!!.start()
 
         lastWidth = w
         lastHeight = h
