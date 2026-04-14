@@ -30,11 +30,16 @@ class ScreenCaptureService : Service() {
         private const val CHANNEL_ID = "screen_capture_channel"
         private const val NOTIFICATION_ID = 1
 
-        // Fraction of the screen that the mirror overlay covers. 1.0f = full
-        // screen. When using single-app projection this gives a clean
-        // full-screen mirror. When projecting the whole screen, expect
-        // feedback flicker because the overlay captures itself.
-        private const val OVERLAY_SCALE = 1.0f
+        // Fraction of the screen height the overlay occupies (anchored to
+        // the TOP, full width). The remaining bottom strip is what actually
+        // gets mirrored — the FrameProcessor crops the captured frame to
+        // that strip and scales it up to fill the overlay. Larger values
+        // make the mirror visually larger at the cost of more vertical
+        // stretch of the source strip.
+        //   0.50 → 1:1, no stretch
+        //   0.65 → ~1.86x vertical stretch
+        //   0.75 → 3x vertical stretch
+        private const val OVERLAY_HEIGHT_FRACTION = 0.65f
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -114,17 +119,19 @@ class ScreenCaptureService : Service() {
 
         imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
 
-        // Floating overlay sized to a fraction of the screen. It must NOT cover
-        // the whole display: the overlay uses FLAG_SECURE to stay out of the
-        // capture loop, and FLAG_SECURE windows show up as solid black in the
-        // captured frames. A smaller overlay means only a small rectangle of
-        // the mirrored image is blacked out where the overlay itself lives.
-        val overlayW = (w * OVERLAY_SCALE).toInt()
-        val overlayH = (h * OVERLAY_SCALE).toInt()
-        overlayManager = OverlayManager(this, overlayW, overlayH)
+        // Horizontal split layout: overlay sits at the TOP of the screen
+        // covering the full width and OVERLAY_HEIGHT_FRACTION of the screen
+        // height. The non-overlay strip is the remaining bottom portion,
+        // which becomes the mirror source. The overlay uses FLAG_SECURE so
+        // its rectangle is captured as black; the FrameProcessor crops that
+        // black region out and only emits the bottom strip.
+        val overlayH = (h * OVERLAY_HEIGHT_FRACTION).toInt()
+        val cropTop = overlayH
+        val cropHeight = h - overlayH
+        overlayManager = OverlayManager(this, w, overlayH)
         overlayManager!!.show()
 
-        frameProcessor = FrameProcessor(imageReader!!, w, h) { bitmap ->
+        frameProcessor = FrameProcessor(imageReader!!, w, h, cropTop, cropHeight) { bitmap ->
             overlayManager?.submitFrame(bitmap)
         }
         frameProcessor!!.start()
@@ -161,12 +168,13 @@ class ScreenCaptureService : Service() {
         virtualDisplay?.resize(w, h, density)
         virtualDisplay?.surface = imageReader!!.surface
 
-        val overlayW = (w * OVERLAY_SCALE).toInt()
-        val overlayH = (h * OVERLAY_SCALE).toInt()
-        overlayManager = OverlayManager(this, overlayW, overlayH)
+        val overlayH = (h * OVERLAY_HEIGHT_FRACTION).toInt()
+        val cropTop = overlayH
+        val cropHeight = h - overlayH
+        overlayManager = OverlayManager(this, w, overlayH)
         overlayManager!!.show()
 
-        frameProcessor = FrameProcessor(imageReader!!, w, h) { bitmap ->
+        frameProcessor = FrameProcessor(imageReader!!, w, h, cropTop, cropHeight) { bitmap ->
             overlayManager?.submitFrame(bitmap)
         }
         frameProcessor!!.start()
