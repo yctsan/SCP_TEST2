@@ -52,13 +52,20 @@ class FrameProcessor(
 
                 if (!overlaySurface.isValid) return@setOnImageAvailableListener
 
-                val canvas: Canvas = overlaySurface.lockCanvas(null) ?: return@setOnImageAvailableListener
+                // lockHardwareCanvas is the correct path for a Surface backed by a
+                // TextureView's SurfaceTexture — software lockCanvas() silently
+                // produces no output on some devices.
+                val canvas: Canvas = overlaySurface.lockHardwareCanvas() ?: return@setOnImageAvailableListener
 
-                // Apply horizontal flip (1:1, no scaling)
-                canvas.setMatrix(flipMatrix)
-                canvas.drawBitmap(reusableBitmap!!, 0f, 0f, paint)
-
-                overlaySurface.unlockCanvasAndPost(canvas)
+                try {
+                    // Clear any previous frame so we don't composite over stale pixels
+                    canvas.drawColor(android.graphics.Color.BLACK)
+                    // Apply horizontal flip (1:1, no scaling)
+                    canvas.setMatrix(flipMatrix)
+                    canvas.drawBitmap(reusableBitmap!!, 0f, 0f, paint)
+                } finally {
+                    overlaySurface.unlockCanvasAndPost(canvas)
+                }
                 frameCount++
             } catch (e: Exception) {
                 // Silently skip bad frames

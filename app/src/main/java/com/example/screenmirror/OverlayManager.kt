@@ -29,10 +29,11 @@ class OverlayManager(
     fun show(onSurfaceReady: (Surface) -> Unit) {
         surfaceCallback = onSurfaceReady
 
-        // Create a container with a visible red border so the overlay is clearly visible
+        // Transparent container — the TextureView itself paints the mirrored frames.
+        // We deliberately avoid a tinted background so that, if rendering ever lags,
+        // the user does not see a solid colored overlay covering their screen.
         val container = FrameLayout(context)
-        container.setPadding(3, 3, 3, 3)
-        container.setBackgroundColor(Color.argb(180, 255, 0, 0))
+        container.setBackgroundColor(Color.TRANSPARENT)
         containerView = container
 
         val view = TextureView(context)
