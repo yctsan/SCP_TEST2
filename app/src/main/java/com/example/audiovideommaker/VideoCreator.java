@@ -18,6 +18,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 
 public final class VideoCreator {
 
@@ -253,27 +254,31 @@ public final class VideoCreator {
     private static void mux(File outFile, Bitmap bitmap, byte[] pcmData,
                             int sampleRate, int channelCount, long durationUs)
             throws IOException {
-        MediaMuxer muxer = new MediaMuxer(outFile.getAbsolutePath(),
-                MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
 
-        MediaFormat videoFormat = MediaFormat.createVideoFormat(VIDEO_MIME, VIDEO_WIDTH, VIDEO_HEIGHT);
-        videoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT,
+        // Phase 1: encode all video frames into memory buffers.
+        // We must collect the track format (available only after INFO_OUTPUT_FORMAT_CHANGED)
+        // before we can call muxer.addTrack(), which must happen before muxer.start().
+        MediaFormat vf = MediaFormat.createVideoFormat(VIDEO_MIME, VIDEO_WIDTH, VIDEO_HEIGHT);
+        vf.setInteger(MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-        videoFormat.setInteger(MediaFormat.KEY_BIT_RATE,         VIDEO_BIT);
-        videoFormat.setInteger(MediaFormat.KEY_FRAME_RATE,       VIDEO_FPS);
-        videoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+        vf.setInteger(MediaFormat.KEY_BIT_RATE,         VIDEO_BIT);
+        vf.setInteger(MediaFormat.KEY_FRAME_RATE,       VIDEO_FPS);
+        vf.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
 
-        MediaCodec videoEncoder = MediaCodec.createEncoderByType(VIDEO_MIME);
-        videoEncoder.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        Surface surface = videoEncoder.createInputSurface();
-        videoEncoder.start();
+        MediaCodec videoEnc = MediaCodec.createEncoderByType(VIDEO_MIME);
+        videoEnc.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        Surface surface = videoEnc.createInputSurface();
+        videoEnc.start();
+
+        long totalFrames = Math.max(1L, (long) ((durationUs / 1000000.0) * VIDEO_FPS));
+        long frameUs     = 1000000L / VIDEO_FPS;
+        long frameIdx    = 0;
+        boolean videoDone = false;
 
         MediaCodec.BufferInfo videoInfo = new MediaCodec.BufferInfo();
-        int     videoTrackId = -1;
-        long    totalFrames  = Math.max(1L, (long) ((durationUs / 1000000.0) * VIDEO_FPS));
-        long    frameUs      = 1000000L / VIDEO_FPS;
-        long    frameIdx     = 0;
-        boolean videoDone    = false;
+        MediaFormat videoTrackFormat = null;
+        ArrayList<byte[]> videoChunks = new ArrayList<byte[]>();
+        ArrayList<Long>   videoPtsUs  = new ArrayList<Long>();
 
         while (!videoDone) {
             if (frameIdx <= totalFrames) {
@@ -281,70 +286,98 @@ public final class VideoCreator {
                 c.drawBitmap(bitmap, 0f, 0f, null);
                 surface.unlockCanvasAndPost(c);
                 frameIdx++;
-                if (frameIdx > totalFrames) videoEncoder.signalEndOfInputStream();
+                if (frameIdx > totalFrames) videoEnc.signalEndOfInputStream();
             }
-            int outIdx = videoEncoder.dequeueOutputBuffer(videoInfo, TIMEOUT_US);
+            int outIdx = videoEnc.dequeueOutputBuffer(videoInfo, TIMEOUT_US);
             if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                videoTrackId = muxer.addTrack(videoEncoder.getOutputFormat());
+                videoTrackFormat = videoEnc.getOutputFormat();
             } else if (outIdx >= 0) {
-                ByteBuffer buf = videoEncoder.getOutputBuffer(outIdx);
-                if ((videoInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
-                    videoInfo.presentationTimeUs = (frameIdx - 1) * frameUs;
-                    if (videoTrackId >= 0) muxer.writeSampleData(videoTrackId, buf, videoInfo);
+                ByteBuffer buf = videoEnc.getOutputBuffer(outIdx);
+                if ((videoInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
+                        && videoTrackFormat != null) {
+                    byte[] chunk = new byte[videoInfo.size];
+                    buf.get(chunk);
+                    videoChunks.add(chunk);
+                    videoPtsUs.add((frameIdx - 1) * frameUs);
                 }
-                videoEncoder.releaseOutputBuffer(outIdx, false);
+                videoEnc.releaseOutputBuffer(outIdx, false);
                 if ((videoInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) videoDone = true;
             }
         }
+        videoEnc.stop(); videoEnc.release(); surface.release();
 
-        MediaFormat audioFormat = MediaFormat.createAudioFormat(AUDIO_MIME, sampleRate, channelCount);
-        audioFormat.setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BIT);
-        audioFormat.setInteger(MediaFormat.KEY_AAC_PROFILE,
-                MediaCodecInfo.CodecProfileLevel.AACObjectLC);
+        // Phase 2: encode all audio frames into memory buffers.
+        MediaFormat af = MediaFormat.createAudioFormat(AUDIO_MIME, sampleRate, channelCount);
+        af.setInteger(MediaFormat.KEY_BIT_RATE,   AUDIO_BIT);
+        af.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC);
 
-        MediaCodec audioEncoder = MediaCodec.createEncoderByType(AUDIO_MIME);
-        audioEncoder.configure(audioFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        audioEncoder.start();
+        MediaCodec audioEnc = MediaCodec.createEncoderByType(AUDIO_MIME);
+        audioEnc.configure(af, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        audioEnc.start();
 
         MediaCodec.BufferInfo audioInfo = new MediaCodec.BufferInfo();
-        int     audioTrackId = muxer.addTrack(audioEncoder.getOutputFormat());
-        muxer.start();
+        MediaFormat audioTrackFormat = null;
+        ArrayList<byte[]> audioChunks = new ArrayList<byte[]>();
+        ArrayList<Long>   audioPtsUs  = new ArrayList<Long>();
 
         int     pcmOffset  = 0;
+        long    audioPts   = 0L;
         boolean audioDone  = false;
-        long    audioPtsUs = 0L;
 
         while (!audioDone) {
-            int inIdx = audioEncoder.dequeueInputBuffer(TIMEOUT_US);
+            int inIdx = audioEnc.dequeueInputBuffer(TIMEOUT_US);
             if (inIdx >= 0) {
-                ByteBuffer buf   = audioEncoder.getInputBuffer(inIdx);
+                ByteBuffer buf = audioEnc.getInputBuffer(inIdx);
                 buf.clear();
                 int chunk = Math.min(buf.capacity(), pcmData.length - pcmOffset);
                 if (chunk <= 0) {
-                    audioEncoder.queueInputBuffer(inIdx, 0, 0, audioPtsUs,
+                    audioEnc.queueInputBuffer(inIdx, 0, 0, audioPts,
                             MediaCodec.BUFFER_FLAG_END_OF_STREAM);
                 } else {
                     buf.put(pcmData, pcmOffset, chunk);
-                    audioEncoder.queueInputBuffer(inIdx, 0, chunk, audioPtsUs, 0);
-                    audioPtsUs += (long) (chunk / (channelCount * 2)) * 1000000L / sampleRate;
-                    pcmOffset  += chunk;
+                    audioEnc.queueInputBuffer(inIdx, 0, chunk, audioPts, 0);
+                    audioPts  += (long) (chunk / (channelCount * 2)) * 1000000L / sampleRate;
+                    pcmOffset += chunk;
                 }
             }
-            int outIdx = audioEncoder.dequeueOutputBuffer(audioInfo, TIMEOUT_US);
+            int outIdx = audioEnc.dequeueOutputBuffer(audioInfo, TIMEOUT_US);
             if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                audioTrackId = muxer.addTrack(audioEncoder.getOutputFormat());
+                audioTrackFormat = audioEnc.getOutputFormat();
             } else if (outIdx >= 0) {
-                ByteBuffer buf = audioEncoder.getOutputBuffer(outIdx);
-                if ((audioInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0)
-                    muxer.writeSampleData(audioTrackId, buf, audioInfo);
-                audioEncoder.releaseOutputBuffer(outIdx, false);
+                ByteBuffer buf = audioEnc.getOutputBuffer(outIdx);
+                if ((audioInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
+                        && audioTrackFormat != null) {
+                    byte[] chunk = new byte[audioInfo.size];
+                    buf.get(chunk);
+                    audioChunks.add(chunk);
+                    audioPtsUs.add(audioInfo.presentationTimeUs);
+                }
+                audioEnc.releaseOutputBuffer(outIdx, false);
                 if ((audioInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) audioDone = true;
             }
         }
+        audioEnc.stop(); audioEnc.release();
 
-        audioEncoder.stop(); audioEncoder.release();
-        videoEncoder.stop(); videoEncoder.release();
-        surface.release();
+        if (videoTrackFormat == null) throw new IOException("Video encoder produced no track format");
+        if (audioTrackFormat == null) throw new IOException("Audio encoder produced no track format");
+
+        // Phase 3: add both tracks, start muxer, write all buffered samples.
+        MediaMuxer muxer = new MediaMuxer(outFile.getAbsolutePath(),
+                MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        int videoTrackId = muxer.addTrack(videoTrackFormat);
+        int audioTrackId = muxer.addTrack(audioTrackFormat);
+        muxer.start();
+
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        for (int i = 0; i < videoChunks.size(); i++) {
+            info.set(0, videoChunks.get(i).length, videoPtsUs.get(i), 0);
+            muxer.writeSampleData(videoTrackId, ByteBuffer.wrap(videoChunks.get(i)), info);
+        }
+        for (int i = 0; i < audioChunks.size(); i++) {
+            info.set(0, audioChunks.get(i).length, audioPtsUs.get(i), 0);
+            muxer.writeSampleData(audioTrackId, ByteBuffer.wrap(audioChunks.get(i)), info);
+        }
+
         muxer.stop(); muxer.release();
     }
 }
