@@ -2,10 +2,8 @@ package com.example.audiovideommaker;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -20,10 +18,9 @@ import android.widget.Toast;
 
 public class MainActivity extends Activity {
 
-    private static final int REQ_PICK_AUDIO  = 1;
-    private static final int REQ_PICK_IMAGE  = 2;
-    private static final int REQ_SAVE_VIDEO  = 3;
-    private static final int REQ_PERMISSIONS = 4;
+    private static final int REQ_PICK_AUDIO = 1;
+    private static final int REQ_PICK_IMAGE = 2;
+    private static final int REQ_SAVE_VIDEO = 3;
 
     private Button      btnPickAudio;
     private TextView    tvAudioPath;
@@ -65,17 +62,11 @@ public class MainActivity extends Activity {
         setupBalanceSeek();
 
         btnPickAudio.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                if (hasMediaPermissions()) pickAudio();
-                else requestMediaPermissions();
-            }
+            @Override public void onClick(View v) { pickAudio(); }
         });
 
         btnPickImage.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                if (hasMediaPermissions()) pickImage();
-                else requestMediaPermissions();
-            }
+            @Override public void onClick(View v) { pickImage(); }
         });
 
         btnDefaultImage.setOnClickListener(new View.OnClickListener() {
@@ -102,7 +93,7 @@ public class MainActivity extends Activity {
     }
 
     private void pickImage() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("image/*");
         startActivityForResult(intent, REQ_PICK_IMAGE);
@@ -124,16 +115,20 @@ public class MainActivity extends Activity {
         if (requestCode == REQ_PICK_AUDIO) {
             final Uri uri = data.getData();
             if (uri == null) return;
-            getContentResolver().takePersistableUriPermission(
-                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try {
+                getContentResolver().takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (SecurityException ignored) {}
             audioUri = uri;
             tvAudioPath.setText(FileUtils.displayName(this, uri));
 
         } else if (requestCode == REQ_PICK_IMAGE) {
             final Uri uri = data.getData();
             if (uri == null) return;
-            getContentResolver().takePersistableUriPermission(
-                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try {
+                getContentResolver().takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (SecurityException ignored) {}
             imageUri = uri;
             tvImagePath.setText(FileUtils.displayName(this, uri));
             ivPreview.setImageURI(uri);
@@ -165,22 +160,6 @@ public class MainActivity extends Activity {
                     }
                 }
             }).start();
-        }
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode,
-            String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQ_PERMISSIONS) {
-            boolean allGranted = true;
-            for (int result : grantResults) {
-                if (result != PackageManager.PERMISSION_GRANTED) {
-                    allGranted = false;
-                    break;
-                }
-            }
-            if (!allGranted) toast(getString(R.string.permission_rationale));
         }
     }
 
@@ -258,32 +237,4 @@ public class MainActivity extends Activity {
         Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
     }
 
-    private boolean hasMediaPermissions() {
-        if (Build.VERSION.SDK_INT >= 33) {
-            return checkSelfPermission("android.permission.READ_MEDIA_AUDIO")
-                    == PackageManager.PERMISSION_GRANTED;
-        } else {
-            return checkSelfPermission("android.permission.READ_EXTERNAL_STORAGE")
-                    == PackageManager.PERMISSION_GRANTED;
-        }
-    }
-
-    private void requestMediaPermissions() {
-        if (Build.VERSION.SDK_INT >= 34) {
-            requestPermissions(new String[]{
-                "android.permission.READ_MEDIA_AUDIO",
-                "android.permission.READ_MEDIA_IMAGES",
-                "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
-            }, REQ_PERMISSIONS);
-        } else if (Build.VERSION.SDK_INT >= 33) {
-            requestPermissions(new String[]{
-                "android.permission.READ_MEDIA_AUDIO",
-                "android.permission.READ_MEDIA_IMAGES"
-            }, REQ_PERMISSIONS);
-        } else {
-            requestPermissions(new String[]{
-                "android.permission.READ_EXTERNAL_STORAGE"
-            }, REQ_PERMISSIONS);
-        }
-    }
 }
