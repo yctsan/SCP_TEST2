@@ -56,11 +56,28 @@ public final class VideoCreator {
         File outFile = new File(context.getCacheDir(),
                 "avm_output_" + System.currentTimeMillis() + ".mp4");
 
+        // Determine output dimensions from the image's pixel orientation.
+        // Portrait images get a 720x1280 frame; everything else gets 1280x720.
+        int outW, outH;
+        if (imageUri != null) {
+            BitmapFactory.Options probe = new BitmapFactory.Options();
+            probe.inJustDecodeBounds = true;
+            InputStream ps = context.getContentResolver().openInputStream(imageUri);
+            if (ps != null) { BitmapFactory.decodeStream(ps, null, probe); ps.close(); }
+            if (probe.outHeight > probe.outWidth && probe.outWidth > 0) {
+                outW = 720; outH = 1280;
+            } else {
+                outW = VIDEO_WIDTH; outH = VIDEO_HEIGHT;
+            }
+        } else {
+            outW = VIDEO_WIDTH; outH = VIDEO_HEIGHT;
+        }
+
         Bitmap srcBitmap;
         if (imageUri != null) {
-            srcBitmap = loadAndScaleBitmap(context, imageUri);
+            srcBitmap = loadAndScaleBitmap(context, imageUri, outW, outH);
         } else {
-            srcBitmap = Bitmap.createBitmap(VIDEO_WIDTH, VIDEO_HEIGHT, Bitmap.Config.ARGB_8888);
+            srcBitmap = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888);
             new Canvas(srcBitmap).drawColor(Color.BLACK);
         }
 
@@ -75,7 +92,7 @@ public final class VideoCreator {
         }
 
         applyBalance(pcm.bytes, pcm.channels, leftVol, rightVol);
-        mux(outFile, srcBitmap, pcm.bytes, pcm.sampleRate, pcm.channels, audioDurationUs);
+        mux(outFile, srcBitmap, pcm.bytes, pcm.sampleRate, pcm.channels, audioDurationUs, outW, outH);
         srcBitmap.recycle();
         return Uri.fromFile(outFile);
     }
@@ -118,45 +135,43 @@ public final class VideoCreator {
         }
     }
 
-    private static Bitmap loadAndScaleBitmap(Context context, Uri uri) throws IOException {
+    private static Bitmap loadAndScaleBitmap(Context context, Uri uri, int reqW, int reqH)
+            throws IOException {
+        // Pass 1: bounds only
         BitmapFactory.Options opts = new BitmapFactory.Options();
         opts.inJustDecodeBounds = true;
         InputStream s1 = context.getContentResolver().openInputStream(uri);
-        if (s1 != null) {
-            BitmapFactory.decodeStream(s1, null, opts);
-            s1.close();
-        }
-        int scaleW = opts.outWidth  / VIDEO_WIDTH;
-        int scaleH = opts.outHeight / VIDEO_HEIGHT;
-        int scale  = Math.max(1, Math.min(scaleW, scaleH));
+        if (s1 != null) { BitmapFactory.decodeStream(s1, null, opts); s1.close(); }
 
+        // Largest power-of-2 inSampleSize such that the decoded image is
+        // still at least reqW × reqH in both dimensions.
+        int inSampleSize = 1;
+        while ((opts.outWidth  / (inSampleSize * 2)) >= reqW
+            && (opts.outHeight / (inSampleSize * 2)) >= reqH) {
+            inSampleSize *= 2;
+        }
+
+        // Pass 2: load at reduced size
         BitmapFactory.Options loadOpts = new BitmapFactory.Options();
-        loadOpts.inSampleSize = scale;
+        loadOpts.inSampleSize = inSampleSize;
         Bitmap raw = null;
         InputStream s2 = context.getContentResolver().openInputStream(uri);
-        if (s2 != null) {
-            raw = BitmapFactory.decodeStream(s2, null, loadOpts);
-            s2.close();
-        }
+        if (s2 != null) { raw = BitmapFactory.decodeStream(s2, null, loadOpts); s2.close(); }
         if (raw == null) {
-            raw = Bitmap.createBitmap(VIDEO_WIDTH, VIDEO_HEIGHT, Bitmap.Config.ARGB_8888);
+            raw = Bitmap.createBitmap(reqW, reqH, Bitmap.Config.ARGB_8888);
         }
 
-        Bitmap scaled = Bitmap.createBitmap(VIDEO_WIDTH, VIDEO_HEIGHT, Bitmap.Config.ARGB_8888);
+        // Scale into an exactly reqW×reqH canvas, letterboxing as needed
+        Bitmap scaled = Bitmap.createBitmap(reqW, reqH, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(scaled);
         canvas.drawColor(Color.BLACK);
-        float ratioSrc = (float) raw.getWidth()  / raw.getHeight();
-        float ratioDst = (float) VIDEO_WIDTH / VIDEO_HEIGHT;
+        float ratioSrc = (float) raw.getWidth() / raw.getHeight();
+        float ratioDst = (float) reqW / reqH;
         int dw, dh;
-        if (ratioSrc > ratioDst) {
-            dw = VIDEO_WIDTH;
-            dh = (int) (VIDEO_WIDTH / ratioSrc);
-        } else {
-            dw = (int) (VIDEO_HEIGHT * ratioSrc);
-            dh = VIDEO_HEIGHT;
-        }
-        float left = (VIDEO_WIDTH  - dw) / 2f;
-        float top  = (VIDEO_HEIGHT - dh) / 2f;
+        if (ratioSrc > ratioDst) { dw = reqW; dh = (int) (reqW / ratioSrc); }
+        else                     { dw = (int) (reqH * ratioSrc); dh = reqH; }
+        float left = (reqW - dw) / 2f;
+        float top  = (reqH - dh) / 2f;
         canvas.drawBitmap(raw, null, new RectF(left, top, left + dw, top + dh), null);
         raw.recycle();
         return scaled;
@@ -252,13 +267,14 @@ public final class VideoCreator {
     }
 
     private static void mux(File outFile, Bitmap bitmap, byte[] pcmData,
-                            int sampleRate, int channelCount, long durationUs)
+                            int sampleRate, int channelCount, long durationUs,
+                            int videoWidth, int videoHeight)
             throws IOException {
 
         // Phase 1: encode all video frames into memory buffers.
         // We must collect the track format (available only after INFO_OUTPUT_FORMAT_CHANGED)
         // before we can call muxer.addTrack(), which must happen before muxer.start().
-        MediaFormat vf = MediaFormat.createVideoFormat(VIDEO_MIME, VIDEO_WIDTH, VIDEO_HEIGHT);
+        MediaFormat vf = MediaFormat.createVideoFormat(VIDEO_MIME, videoWidth, videoHeight);
         vf.setInteger(MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
         vf.setInteger(MediaFormat.KEY_BIT_RATE,         VIDEO_BIT);
