@@ -143,11 +143,28 @@ public final class VideoCreator {
         InputStream s1 = context.getContentResolver().openInputStream(uri);
         if (s1 != null) { BitmapFactory.decodeStream(s1, null, opts); s1.close(); }
 
-        // Largest power-of-2 inSampleSize such that the decoded image is
-        // still at least reqW × reqH in both dimensions.
+        // Compute the minimum decoded size actually needed.
+        // When letterboxing, only the dimension that *fills* the frame must reach reqW/reqH;
+        // the other dimension is smaller. Using reqW×reqH as the floor would keep much more
+        // data than the encoder ever uses (e.g. a square photo only needs ~720 px per side
+        // for a 1280×720 output, not 2500 px per side).
+        int minW = reqW, minH = reqH;
+        if (opts.outWidth > 0 && opts.outHeight > 0) {
+            float rs = (float) opts.outWidth / opts.outHeight;   // source ratio
+            float rd = (float) reqW / reqH;                      // dest ratio
+            if (rs > rd) {
+                // wider than output → width fills frame, height letterboxed
+                minH = Math.max(1, (int) (reqW / rs));
+            } else {
+                // taller than output → height fills frame, width pillarboxed
+                minW = Math.max(1, (int) (reqH * rs));
+            }
+        }
+
+        // Largest power-of-2 inSampleSize where decoded image stays >= minW × minH
         int inSampleSize = 1;
-        while ((opts.outWidth  / (inSampleSize * 2)) >= reqW
-            && (opts.outHeight / (inSampleSize * 2)) >= reqH) {
+        while ((opts.outWidth  / (inSampleSize * 2)) >= minW
+            && (opts.outHeight / (inSampleSize * 2)) >= minH) {
             inSampleSize *= 2;
         }
 
@@ -161,7 +178,7 @@ public final class VideoCreator {
             raw = Bitmap.createBitmap(reqW, reqH, Bitmap.Config.ARGB_8888);
         }
 
-        // Scale into an exactly reqW×reqH canvas, letterboxing as needed
+        // Scale into exactly reqW×reqH, letterboxing as needed
         Bitmap scaled = Bitmap.createBitmap(reqW, reqH, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(scaled);
         canvas.drawColor(Color.BLACK);
