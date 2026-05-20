@@ -277,14 +277,18 @@ public final class VideoCreator {
 
         MediaCodec.BufferInfo videoInfo = new MediaCodec.BufferInfo();
         MediaFormat videoTrackFormat = null;
-        ArrayList<byte[]> videoChunks = new ArrayList<byte[]>();
-        ArrayList<Long>   videoPtsUs  = new ArrayList<Long>();
+        ArrayList<byte[]>   videoChunks = new ArrayList<byte[]>();
+        ArrayList<Long>     videoPtsUs  = new ArrayList<Long>();
+        ArrayList<Integer>  videoFlags  = new ArrayList<Integer>();
+        int videoFrameOut = 0;  // count of actual output frames, used for PTS
 
         while (!videoDone) {
             if (frameIdx <= totalFrames) {
-                Canvas c = surface.lockHardwareCanvas();
-                c.drawBitmap(bitmap, 0f, 0f, null);
-                surface.unlockCanvasAndPost(c);
+                Canvas c = surface.lockCanvas(null);
+                if (c != null) {
+                    c.drawBitmap(bitmap, 0f, 0f, null);
+                    surface.unlockCanvasAndPost(c);
+                }
                 frameIdx++;
                 if (frameIdx > totalFrames) videoEnc.signalEndOfInputStream();
             }
@@ -294,11 +298,13 @@ public final class VideoCreator {
             } else if (outIdx >= 0) {
                 ByteBuffer buf = videoEnc.getOutputBuffer(outIdx);
                 if ((videoInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
-                        && videoTrackFormat != null) {
+                        && videoTrackFormat != null && videoInfo.size > 0) {
                     byte[] chunk = new byte[videoInfo.size];
                     buf.get(chunk);
                     videoChunks.add(chunk);
-                    videoPtsUs.add((frameIdx - 1) * frameUs);
+                    videoPtsUs.add((long) videoFrameOut * frameUs);  // PTS from output index
+                    videoFlags.add(videoInfo.flags);                  // preserve KEY_FRAME flag
+                    videoFrameOut++;
                 }
                 videoEnc.releaseOutputBuffer(outIdx, false);
                 if ((videoInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) videoDone = true;
@@ -370,7 +376,7 @@ public final class VideoCreator {
 
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
         for (int i = 0; i < videoChunks.size(); i++) {
-            info.set(0, videoChunks.get(i).length, videoPtsUs.get(i), 0);
+            info.set(0, videoChunks.get(i).length, videoPtsUs.get(i), videoFlags.get(i));
             muxer.writeSampleData(videoTrackId, ByteBuffer.wrap(videoChunks.get(i)), info);
         }
         for (int i = 0; i < audioChunks.size(); i++) {
