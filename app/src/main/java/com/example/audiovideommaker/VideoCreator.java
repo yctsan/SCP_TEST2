@@ -168,12 +168,35 @@ public final class VideoCreator {
             inSampleSize *= 2;
         }
 
-        // Pass 2: load at reduced size
-        BitmapFactory.Options loadOpts = new BitmapFactory.Options();
-        loadOpts.inSampleSize = inSampleSize;
+        // Hard cap: never decode more than 4 MP (16 MB @ ARGB_8888). Our output is
+        // at most 1280×720 = 921 600 px, so 4 MP is always more than enough to render
+        // without visible quality loss, and keeps us well inside device heap limits.
+        final int MAX_DECODE_PIXELS = 4 * 1024 * 1024;
+        if (opts.outWidth > 0 && opts.outHeight > 0) {
+            while ((long) (opts.outWidth / inSampleSize) * (opts.outHeight / inSampleSize)
+                    > MAX_DECODE_PIXELS) {
+                inSampleSize *= 2;
+            }
+        }
+
+        // Pass 2: decode at reduced size, retrying with 2× inSampleSize on OOM.
+        // BitmapFactory allocates decode-time scratch buffers beyond the final bitmap
+        // size, so OOM is possible even after the cap above on very low-heap devices.
         Bitmap raw = null;
-        InputStream s2 = context.getContentResolver().openInputStream(uri);
-        if (s2 != null) { raw = BitmapFactory.decodeStream(s2, null, loadOpts); s2.close(); }
+        while (raw == null && inSampleSize <= 1024) {
+            BitmapFactory.Options loadOpts = new BitmapFactory.Options();
+            loadOpts.inSampleSize = inSampleSize;
+            try {
+                InputStream s2 = context.getContentResolver().openInputStream(uri);
+                if (s2 != null) {
+                    try { raw = BitmapFactory.decodeStream(s2, null, loadOpts); }
+                    finally { s2.close(); }
+                }
+                if (raw == null) break; // null without OOM → undecodable format, give up
+            } catch (OutOfMemoryError oom) {
+                inSampleSize *= 2;
+            }
+        }
         if (raw == null) {
             raw = Bitmap.createBitmap(reqW, reqH, Bitmap.Config.ARGB_8888);
         }
