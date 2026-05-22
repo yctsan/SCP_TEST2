@@ -179,12 +179,15 @@ public final class VideoCreator {
             }
         }
 
-        // Pass 2: decode at reduced size, retrying with 2× inSampleSize on OOM.
-        // BitmapFactory allocates decode-time scratch buffers beyond the final bitmap
-        // size, so OOM is possible even after the cap above on very low-heap devices.
+        // Pass 2: decode with retry on OOM.
+        // inPreferredConfig = ARGB_8888 forces SDR 8-bit output — without this,
+        // HDR images (Ultra HDR JPEG / HEIC 10-bit) decode to HARDWARE or RGBA_F16
+        // config on Android 10+, and canvas.drawBitmap() on a hardware bitmap
+        // throws IllegalStateException: "Software rendering doesn't support hardware bitmaps".
+        BitmapFactory.Options loadOpts = new BitmapFactory.Options();
+        loadOpts.inPreferredConfig = Bitmap.Config.ARGB_8888;
         Bitmap raw = null;
         while (raw == null && inSampleSize <= 1024) {
-            BitmapFactory.Options loadOpts = new BitmapFactory.Options();
             loadOpts.inSampleSize = inSampleSize;
             try {
                 InputStream s2 = context.getContentResolver().openInputStream(uri);
@@ -192,10 +195,17 @@ public final class VideoCreator {
                     try { raw = BitmapFactory.decodeStream(s2, null, loadOpts); }
                     finally { s2.close(); }
                 }
-                if (raw == null) break; // null without OOM → undecodable format, give up
+                if (raw == null) break; // undecodable format — don't retry
             } catch (OutOfMemoryError oom) {
                 inSampleSize *= 2;
             }
+        }
+
+        // Safety net: if inPreferredConfig hint was ignored (e.g. HARDWARE or RGBA_F16
+        // bitmap returned for HDR images), copy to ARGB_8888 so Canvas ops don't throw.
+        if (raw != null && raw.getConfig() != Bitmap.Config.ARGB_8888) {
+            Bitmap soft = raw.copy(Bitmap.Config.ARGB_8888, false);
+            if (soft != null) { raw.recycle(); raw = soft; }
         }
         if (raw == null) {
             raw = Bitmap.createBitmap(reqW, reqH, Bitmap.Config.ARGB_8888);
