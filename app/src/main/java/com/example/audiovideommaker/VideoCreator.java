@@ -1,5 +1,6 @@
 package com.example.audiovideommaker;
 
+import android.content.ContentResolver;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -135,6 +136,31 @@ public final class VideoCreator {
         }
     }
 
+    // Uses ContentResolver.loadThumbnail (API 29+) via reflection to obtain a
+    // memory-efficient downscaled bitmap.  Unlike BitmapFactory + inSampleSize,
+    // loadThumbnail passes the target dimensions to the content provider so the
+    // hardware decoder can decode at a lower resolution — critical for HEIC/HEIF
+    // images where the hardware HEVC decoder otherwise allocates a full-resolution
+    // native buffer regardless of inSampleSize.
+    // Returns null on API < 29, unsupported URIs, or any decode error.
+    private static Bitmap tryLoadThumbnail(Context context, Uri uri, int w, int h) {
+        if (android.os.Build.VERSION.SDK_INT < 29) return null;
+        try {
+            Class<?> sizeClass = Class.forName("android.util.Size");
+            java.lang.reflect.Constructor<?> sizeCtor =
+                    sizeClass.getConstructor(int.class, int.class);
+            Object sizeObj = sizeCtor.newInstance(w, h);
+            java.lang.reflect.Method loadThumb = ContentResolver.class.getMethod(
+                    "loadThumbnail", Uri.class, sizeClass,
+                    android.os.CancellationSignal.class);
+            return (Bitmap) loadThumb.invoke(context.getContentResolver(), uri, sizeObj, null);
+        } catch (java.lang.reflect.InvocationTargetException ite) {
+            return null; // IOException or other error from loadThumbnail
+        } catch (Exception e) {
+            return null; // reflection unavailable
+        }
+    }
+
     private static Bitmap loadAndScaleBitmap(Context context, Uri uri, int reqW, int reqH)
             throws IOException {
         // Pass 1: bounds only
@@ -179,30 +205,45 @@ public final class VideoCreator {
             }
         }
 
-        // Pass 2: decode with retry on OOM.
-        // inPreferredConfig = ARGB_8888 forces SDR 8-bit output — without this,
-        // HDR images (Ultra HDR JPEG / HEIC 10-bit) decode to HARDWARE or RGBA_F16
-        // config on Android 10+, and canvas.drawBitmap() on a hardware bitmap
-        // throws IllegalStateException: "Software rendering doesn't support hardware bitmaps".
-        BitmapFactory.Options loadOpts = new BitmapFactory.Options();
-        loadOpts.inPreferredConfig = Bitmap.Config.ARGB_8888;
-        Bitmap raw = null;
-        while (raw == null && inSampleSize <= 1024) {
-            loadOpts.inSampleSize = inSampleSize;
-            try {
-                InputStream s2 = context.getContentResolver().openInputStream(uri);
-                if (s2 != null) {
-                    try { raw = BitmapFactory.decodeStream(s2, null, loadOpts); }
-                    finally { s2.close(); }
+        // Pass 2: load the bitmap.
+        //
+        // BitmapFactory + inSampleSize works for JPEG (libjpeg DCT-domain downscaling
+        // is memory-efficient) but NOT for HEIC/HEIF: the hardware HEVC decoder allocates
+        // a full-resolution native buffer (6144×8160×4 ≈ 200 MB for this image) before
+        // Android can apply the sample-size post-processing.  That kills the process with
+        // a native OOM that Java cannot catch.
+        //
+        // ContentResolver.loadThumbnail (API 29+) passes the target size to the content
+        // provider, which can use a purpose-built thumbnail pipeline (hardware decoder with
+        // lower-resolution decode hint, or a pre-stored thumbnail) and never materialises
+        // the full frame in memory.  We call it via reflection because we compile against
+        // the android-23 stub jar.
+        Bitmap raw = tryLoadThumbnail(context, uri, reqW, reqH);
+
+        if (raw == null) {
+            // API < 29, or loadThumbnail unsupported for this URI: fall back to BitmapFactory.
+            // inPreferredConfig = ARGB_8888 prevents HARDWARE / RGBA_F16 bitmaps that
+            // HDR-capable decoders return on Android 10+; those configs cannot be drawn
+            // with a software Canvas and throw IllegalStateException.
+            BitmapFactory.Options loadOpts = new BitmapFactory.Options();
+            loadOpts.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            while (raw == null && inSampleSize <= 1024) {
+                loadOpts.inSampleSize = inSampleSize;
+                try {
+                    InputStream s2 = context.getContentResolver().openInputStream(uri);
+                    if (s2 != null) {
+                        try { raw = BitmapFactory.decodeStream(s2, null, loadOpts); }
+                        finally { s2.close(); }
+                    }
+                    if (raw == null) break; // undecodable format — don't retry
+                } catch (OutOfMemoryError oom) {
+                    inSampleSize *= 2;
                 }
-                if (raw == null) break; // undecodable format — don't retry
-            } catch (OutOfMemoryError oom) {
-                inSampleSize *= 2;
             }
         }
 
-        // Safety net: if inPreferredConfig hint was ignored (e.g. HARDWARE or RGBA_F16
-        // bitmap returned for HDR images), copy to ARGB_8888 so Canvas ops don't throw.
+        // Safety net: if any path returned a HARDWARE / RGBA_F16 bitmap despite our
+        // requests, copy it to ARGB_8888 before Canvas operations.
         if (raw != null && raw.getConfig() != Bitmap.Config.ARGB_8888) {
             Bitmap soft = raw.copy(Bitmap.Config.ARGB_8888, false);
             if (soft != null) { raw.recycle(); raw = soft; }
