@@ -1,13 +1,17 @@
 package com.example.screenmirror
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.PixelFormat
+import android.graphics.SurfaceTexture
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.Surface
+import android.view.TextureView
+import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
-import android.widget.ImageView
 
 class OverlayManager(
     private val context: Context,
@@ -19,21 +23,17 @@ class OverlayManager(
         context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
     private var containerView: FrameLayout? = null
-    private var imageView: ImageView? = null
+    private var textureView: TextureView? = null
+    private var surface: Surface? = null
 
-    fun show() {
+    fun show(onSurfaceReady: (Surface) -> Unit) {
         val container = FrameLayout(context)
-        container.setBackgroundColor(Color.TRANSPARENT)
+        container.setBackgroundColor(Color.BLACK)
         containerView = container
 
-        // Plain ImageView — we push bitmaps to it each frame via setImageBitmap.
-        // scaleX = -1f gives us a free horizontal flip, no canvas matrix needed.
-        // FIT_XY stretches the (smaller) captured strip to fill the full overlay.
-        val img = ImageView(context)
-        img.scaleType = ImageView.ScaleType.FIT_XY
-        img.scaleX = -1f
-        imageView = img
-        container.addView(img, FrameLayout.LayoutParams(
+        val view = TextureView(context)
+        textureView = view
+        container.addView(view, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
@@ -44,11 +44,6 @@ class OverlayManager(
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    // FLAG_SECURE excludes the overlay from MediaProjection captures
-                    // so we don't get a feedback loop. The captured frame contains
-                    // a solid-black rectangle wherever the overlay sits; the service
-                    // is responsible for cropping the frame to only the non-overlay
-                    // region before passing it to submitFrame().
                     WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -57,19 +52,75 @@ class OverlayManager(
             y = 0
         }
 
+        view.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(
+                st: SurfaceTexture,
+                width: Int,
+                height: Int
+            ) {
+                applyFlip(view, width, height)
+                surface = Surface(st)
+                onSurfaceReady(surface!!)
+            }
+
+            override fun onSurfaceTextureSizeChanged(
+                st: SurfaceTexture,
+                width: Int,
+                height: Int
+            ) {
+                applyFlip(view, width, height)
+            }
+
+            override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                surface?.release()
+                surface = null
+                return true
+            }
+
+            override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+        }
+
+        // Drag to move the overlay
+        container.setOnTouchListener(object : View.OnTouchListener {
+            private var initialX = 0
+            private var initialY = 0
+            private var touchX = 0f
+            private var touchY = 0f
+
+            override fun onTouch(v: View, event: MotionEvent): Boolean {
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        initialX = params.x
+                        initialY = params.y
+                        touchX = event.rawX
+                        touchY = event.rawY
+                        return true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        params.x = initialX + (event.rawX - touchX).toInt()
+                        params.y = initialY + (event.rawY - touchY).toInt()
+                        windowManager.updateViewLayout(container, params)
+                        return true
+                    }
+                }
+                return false
+            }
+        })
+
         windowManager.addView(container, params)
     }
 
-    /** Must be called on the main thread. */
-    fun submitFrame(bitmap: Bitmap) {
-        imageView?.setImageBitmap(bitmap)
+    fun dismiss() {
+        containerView?.let { windowManager.removeView(it) }
+        containerView = null
+        textureView = null
+        surface?.release()
+        surface = null
     }
 
-    fun dismiss() {
-        containerView?.let {
-            windowManager.removeView(it)
-        }
-        containerView = null
-        imageView = null
+    private fun applyFlip(view: TextureView, width: Int, height: Int) {
+        val m = Matrix()
+        m.setScale(-1f, 1f, width / 2f, height / 2f)
+        view.setTransform(m)
     }
 }

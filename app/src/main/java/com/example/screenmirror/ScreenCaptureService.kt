@@ -8,10 +8,8 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
-import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
-import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
@@ -29,24 +27,11 @@ class ScreenCaptureService : Service() {
         const val EXTRA_DATA = "data"
         private const val CHANNEL_ID = "screen_capture_channel"
         private const val NOTIFICATION_ID = 1
-
-        // Fraction of the screen height the overlay occupies (anchored to
-        // the TOP, full width). The remaining bottom strip is what actually
-        // gets mirrored — the FrameProcessor crops the captured frame to
-        // that strip and scales it up to fill the overlay. Larger values
-        // make the mirror visually larger at the cost of more vertical
-        // stretch of the source strip.
-        //   0.50 → 1:1, no stretch
-        //   0.65 → ~1.86x vertical stretch
-        //   0.75 → 3x vertical stretch
-        private const val OVERLAY_HEIGHT_FRACTION = 0.65f
     }
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
-    private var imageReader: ImageReader? = null
     private var overlayManager: OverlayManager? = null
-    private var frameProcessor: FrameProcessor? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var lastWidth = 0
     private var lastHeight = 0
@@ -90,7 +75,6 @@ class ScreenCaptureService : Service() {
                 return
             }
 
-            // Android 14+ requires the callback to be registered BEFORE createVirtualDisplay
             mediaProjection!!.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
                     stopCapture()
@@ -117,81 +101,38 @@ class ScreenCaptureService : Service() {
         lastWidth = w
         lastHeight = h
 
-        imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
-
-        // Horizontal split layout: overlay sits at the TOP of the screen
-        // covering the full width and OVERLAY_HEIGHT_FRACTION of the screen
-        // height. The non-overlay strip is the remaining bottom portion,
-        // which becomes the mirror source. The overlay uses FLAG_SECURE so
-        // its rectangle is captured as black; the FrameProcessor crops that
-        // black region out and only emits the bottom strip.
-        val overlayH = (h * OVERLAY_HEIGHT_FRACTION).toInt()
-        val cropTop = overlayH
-        val cropHeight = h - overlayH
-        overlayManager = OverlayManager(this, w, overlayH)
-        overlayManager!!.show()
-
-        frameProcessor = FrameProcessor(imageReader!!, w, h, cropTop, cropHeight) { bitmap ->
-            overlayManager?.submitFrame(bitmap)
+        overlayManager = OverlayManager(this, w, h)
+        overlayManager!!.show { surface ->
+            virtualDisplay = mediaProjection!!.createVirtualDisplay(
+                "ScreenMirror",
+                w,
+                h,
+                density,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                surface,
+                null, null
+            )
         }
-        frameProcessor!!.start()
-
-        virtualDisplay = mediaProjection!!.createVirtualDisplay(
-            "ScreenMirror",
-            w,
-            h,
-            density,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader!!.surface,
-            null, null
-        )
     }
 
-    /**
-     * Rebuild the downstream pipeline (ImageReader + overlay + FrameProcessor) at
-     * new dimensions, while keeping the existing VirtualDisplay alive. Android 14+
-     * treats releasing + recreating a VirtualDisplay from the same MediaProjection
-     * as a token-reuse error, so we must resize the existing display in place.
-     */
     private fun resizePipeline(w: Int, h: Int, density: Int) {
-        frameProcessor?.stop()
-        frameProcessor = null
-
-        imageReader?.close()
-        imageReader = null
-
+        virtualDisplay?.surface = null
         overlayManager?.dismiss()
         overlayManager = null
 
-        imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
-
-        virtualDisplay?.resize(w, h, density)
-        virtualDisplay?.surface = imageReader!!.surface
-
-        val overlayH = (h * OVERLAY_HEIGHT_FRACTION).toInt()
-        val cropTop = overlayH
-        val cropHeight = h - overlayH
-        overlayManager = OverlayManager(this, w, overlayH)
-        overlayManager!!.show()
-
-        frameProcessor = FrameProcessor(imageReader!!, w, h, cropTop, cropHeight) { bitmap ->
-            overlayManager?.submitFrame(bitmap)
+        overlayManager = OverlayManager(this, w, h)
+        overlayManager!!.show { surface ->
+            virtualDisplay?.resize(w, h, density)
+            virtualDisplay?.surface = surface
         }
-        frameProcessor!!.start()
 
         lastWidth = w
         lastHeight = h
     }
 
     private fun teardownPipeline() {
-        frameProcessor?.stop()
-        frameProcessor = null
-
         virtualDisplay?.release()
         virtualDisplay = null
-
-        imageReader?.close()
-        imageReader = null
 
         overlayManager?.dismiss()
         overlayManager = null
@@ -201,7 +142,6 @@ class ScreenCaptureService : Service() {
         super.onConfigurationChanged(newConfig)
         if (mediaProjection == null || virtualDisplay == null) return
 
-        // Post so the WindowManager has already applied the new rotation
         mainHandler.post {
             if (mediaProjection == null || virtualDisplay == null) return@post
             val metrics = currentMetrics()
