@@ -1,6 +1,7 @@
 package com.example.screenmirror
 
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.PixelFormat
@@ -50,6 +51,8 @@ class OverlayManager(
             gravity = Gravity.TOP or Gravity.START
             x = 0
             y = 0
+            // A visible overlay window with an orientation request holds the whole display at that rotation.
+            screenOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
         }
 
         view.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
