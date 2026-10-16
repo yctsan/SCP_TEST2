@@ -9,6 +9,11 @@ An Android app for trimming and joining H.265/HEVC MP4 clips, such as those reco
   - **Keep original codec (no re-encoding):** samples are copied byte-for-byte. Fast and lossless.
   - **Re-encode:** choose H.265 or H.264 (whichever this phone can encode), the resolution (same, 2160p, 1440p, 1080p, 720p) and the bitrate. Cuts are frame-accurate.
 
+Exports keep running when you switch to another app or turn the screen off: they run in a foreground service
+with a notification showing progress, the estimated time left, and a Cancel button. The app shows the same
+estimate while it is open. On Android 13+ the app asks for permission to show notifications; if you decline,
+exports still run in the background, but the progress notification is hidden.
+
 Requires Android 8.0 (API 26) or newer.
 
 ## Install
@@ -32,7 +37,6 @@ The app has its own MP4 reader and writer (`Mp4Source`, `Mp4Writer`) instead of 
 - **Re-encoding outputs 8-bit SDR.** 10-bit sources (D-Log M, HLG) are decoded and re-encoded without tone mapping, so their colours will not match the original. Use *Keep original codec* to keep 10-bit/HDR footage untouched.
 - If the clips' audio formats differ, the output has no audio (the app tells you). Clips without audio leave silent gaps.
 - DJI's extra tracks (timecode, `djmd` telemetry) are not copied; only the first video and first audio track are.
-- Export runs while the app is open (the screen is kept on). Leaving the app during a long export can let Android stop it.
 - Files must be on device storage (or an SD card). Cloud-only documents that can't be opened for random access will fail.
 
 ## Building
@@ -60,4 +64,5 @@ Open the project folder in Android Studio. `app/build.gradle.kts` uses AGP 8.5.2
   - Clips with different codec settings are refused with an explanation.
   - The `hvcC` box built for encoder output matches FFmpeg's field for field.
 - The APK's manifest and v2 signature were checked with androguard and apksig.
-- **Not yet tested on a phone or emulator:** the UI, the preview, and the `MediaCodec`/OpenGL re-encode path have been compiled but never run. Please report anything that fails.
+- Version 1.0 was tested by the user on a phone: loading, trimming, ordering and both export modes work.
+- Version 1.1 (background export via a foreground service, time-left estimate) has been compiled and its manifest checked, but not yet run on a phone.

@@ -24,12 +24,14 @@ ATTRS = {
     "versionCode": (0x0101021B, "int"),
     "versionName": (0x0101021C, "string"),
     "targetSdkVersion": (0x01010270, "int"),
+    "foregroundServiceType": (0x01010599, "fgs"),
 }
 # framework resource references used by the manifest (from android.R)
 REFS = {
     "@android:style/Theme.Material.Light.DarkActionBar": 0x01030238,
     "@android:mipmap/sym_def_app_icon": 0x010D0000,
 }
+FGS_TYPES = {"dataSync": 0x1}
 CONFIG_FLAGS = {
     "keyboardHidden": 0x0020, "orientation": 0x0080, "screenLayout": 0x0100,
     "screenSize": 0x0400, "smallestScreenSize": 0x0800,
@@ -87,6 +89,11 @@ def encode(root):
                     f = 0
                     for part in v.split("|"):
                         f |= CONFIG_FLAGS[part]
+                    raw, typ, data = 0xFFFFFFFF, TYPE_INT_HEX, f
+                elif kind == "fgs":
+                    f = 0
+                    for part in v.split("|"):
+                        f |= FGS_TYPES[part]
                     raw, typ, data = 0xFFFFFFFF, TYPE_INT_HEX, f
                 elif kind == "ref":
                     raw, typ, data = 0xFFFFFFFF, TYPE_REFERENCE, REFS[v]

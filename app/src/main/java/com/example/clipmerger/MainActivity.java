@@ -1,24 +1,24 @@
 package com.example.clipmerger;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.NotificationManager;
 import android.content.ClipData;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.ParcelFileDescriptor;
-import android.os.SystemClock;
-import android.provider.DocumentsContract;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.WindowManager;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -32,8 +32,6 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.FileOutputStream;
-import java.nio.channels.FileChannel;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -41,9 +39,8 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.atomic.AtomicBoolean;
 
-public class MainActivity extends Activity {
+public class MainActivity extends Activity implements ExportJob.Listener {
 
     private static final int REQ_PICK = 1;
     private static final int REQ_TRIM = 2;
@@ -51,7 +48,6 @@ public class MainActivity extends Activity {
 
     private final ArrayList<Clip> clips = new ArrayList<>();
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private final AtomicBoolean cancel = new AtomicBoolean();
 
     private LinearLayout list;
     private TextView summary, status;
@@ -59,6 +55,7 @@ public class MainActivity extends Activity {
     private ProgressBar progressBar;
     private View progressPanel;
     private Export.Options pendingOptions;
+    private Uri pendingOutput;
     private boolean busy;
 
     @Override
@@ -119,7 +116,8 @@ public class MainActivity extends Activity {
         cancelButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                cancel.set(true);
+                ExportJob job = ExportJob.current();
+                if (job != null) job.cancel.set(true);
                 cancelButton.setEnabled(false);
                 status.setText("Cancelling…");
             }
@@ -278,6 +276,7 @@ public class MainActivity extends Activity {
 
     private void showExportDialog() {
         if (clips.isEmpty()) return;
+        requestNotificationPermission();
         final Clip first = clips.get(0);
         LinearLayout v = new LinearLayout(this);
         v.setOrientation(LinearLayout.VERTICAL);
@@ -400,82 +399,41 @@ public class MainActivity extends Activity {
         startActivityForResult(i, REQ_SAVE);
     }
 
-    private void startExport(final Uri output, final Export.Options opt) {
-        final ArrayList<Clip> snapshot = new ArrayList<>(clips);
-        cancel.set(false);
-        cancelButton.setEnabled(true);
-        progressBar.setProgress(0);
-        setBusy(true, "Exporting…");
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        final long started = SystemClock.elapsedRealtime();
-        final Export.Progress progress = new Export.Progress() {
-            private long lastPost;
-
-            @Override
-            public void update(final long doneUs, final long totalUs) throws Export.Cancelled {
-                if (cancel.get()) throw new Export.Cancelled();
-                long now = SystemClock.elapsedRealtime();
-                if (now - lastPost < 200) return;
-                lastPost = now;
-                ui.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        float f = totalUs > 0 ? Math.min(1f, doneUs / (float) totalUs) : 0f;
-                        progressBar.setProgress((int) (f * 1000));
-                        status.setText(String.format(Locale.US, "Exporting… %.1f%%  (%s of %s)",
-                                f * 100, Clip.formatUs(doneUs), Clip.formatUs(totalUs)));
-                    }
-                });
-            }
-        };
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                String warning = null;
-                Throwable error = null;
-                ParcelFileDescriptor pfd = null;
-                try {
-                    pfd = getContentResolver().openFileDescriptor(output, "rw");
-                    if (pfd == null) throw new Export.Failure("Cannot open the output file.");
-                    FileOutputStream fos = new FileOutputStream(pfd.getFileDescriptor());
-                    FileChannel ch = fos.getChannel();
-                    warning = opt.reencode
-                            ? Transcoder.run(MainActivity.this, snapshot, opt, ch, progress)
-                            : LosslessMerger.run(MainActivity.this, snapshot, ch, progress);
-                    ch.close();
-                } catch (Throwable t) {
-                    error = t;
-                } finally {
-                    if (pfd != null) {
-                        try {
-                            pfd.close();
-                        } catch (Exception ignored) {
-                        }
-                    }
-                }
-                if (error != null) {
-                    try {
-                        DocumentsContract.deleteDocument(getContentResolver(), output);
-                    } catch (Exception ignored) {
-                    }
-                }
-                final String w = warning;
-                final Throwable e = error;
-                final long seconds = (SystemClock.elapsedRealtime() - started) / 1000;
-                ui.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        exportFinished(output, w, e, seconds);
-                    }
-                });
-            }
-        }, "export").start();
+    private void startExport(Uri output, Export.Options opt) {
+        ExportJob job = ExportJob.create(clips, opt, output);
+        job.addListener(this);
+        ExportService.start(this);
+        render(job);
     }
 
-    private void exportFinished(final Uri output, String warning, Throwable error, long seconds) {
-        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    @Override
+    public void onExportChanged(ExportJob job) {
+        render(job);
+    }
+
+    /** Shows the state of {@code job}: progress while it runs, the result once it has finished. */
+    private void render(ExportJob job) {
+        if (job.running) {
+            if (!busy) {
+                cancelButton.setEnabled(!job.cancel.get());
+                setBusy(true, "Exporting…");
+            }
+            progressBar.setProgress((int) (job.fraction() * 1000));
+            status.setText("Exporting… " + job.progressText() + "\n"
+                    + Clip.formatUs(job.doneUs) + " of " + Clip.formatUs(job.totalUs)
+                    + " · elapsed " + ExportJob.formatDuration(job.elapsedMs()));
+            return;
+        }
+        job.removeListener(this);
+        ExportJob.clearFinished();
+        getSystemService(NotificationManager.class).cancel(ExportService.ID_DONE);
         setBusy(false, null);
-        if (isFinishing() || isDestroyed()) return;
+        showResult(job);
+    }
+
+    private void showResult(ExportJob job) {
+        final Uri output = job.output;
+        Throwable error = job.error;
         if (error instanceof Export.Cancelled) {
             toast("Export cancelled");
             return;
@@ -485,8 +443,8 @@ public class MainActivity extends Activity {
             message("Export failed", msg);
             return;
         }
-        String text = "Saved " + Clip.displayName(this, output) + String.format(Locale.US, " in %d:%02d.", seconds / 60, seconds % 60);
-        if (warning != null) text += "\n\n" + warning;
+        String text = "Saved " + Clip.displayName(this, output) + " in " + ExportJob.formatDuration(job.elapsedMs()) + ".";
+        if (job.warning != null) text += "\n\n" + job.warning;
         new AlertDialog.Builder(this)
                 .setTitle("Done")
                 .setMessage(text)
@@ -505,6 +463,39 @@ public class MainActivity extends Activity {
                     }
                 })
                 .show();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (pendingOutput != null) {
+            // Started here rather than in onActivityResult so the app is in the foreground,
+            // which Android requires for starting a foreground service.
+            Uri out = pendingOutput;
+            pendingOutput = null;
+            startExport(out, pendingOptions);
+            pendingOptions = null;
+            return;
+        }
+        ExportJob job = ExportJob.current();
+        if (job != null) {
+            job.addListener(this);
+            render(job);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        ExportJob job = ExportJob.current();
+        if (job != null) job.removeListener(this);
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 0);
+        }
     }
 
     // ---- results ------------------------------------------------------------------------------
@@ -538,15 +529,14 @@ public class MainActivity extends Activity {
                 refresh();
             }
         } else if (requestCode == REQ_SAVE && data.getData() != null && pendingOptions != null) {
-            startExport(data.getData(), pendingOptions);
-            pendingOptions = null;
+            pendingOutput = data.getData();
         }
     }
 
     @Override
     public void onBackPressed() {
         if (busy) {
-            toast("Please wait, or cancel the export first");
+            moveTaskToBack(true); // keep the clip list; the export continues in the background
             return;
         }
         super.onBackPressed();
